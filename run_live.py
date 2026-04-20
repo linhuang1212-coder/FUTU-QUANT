@@ -359,6 +359,20 @@ class MultiStrategyTrader:
             {"name": "rebalance_2pm", "params": {
                 "move_threshold_pct": 1.5, "entry_bar_idx": 48,
                 "stop_pct": 1.0}},
+            {"name": "afternoon_ext", "params": {
+                "move_threshold_pct": 1.5, "entry_bar_idx": 36,
+                "stop_pct": 1.0}},
+            {"name": "vol_squeeze", "params": {
+                "squeeze_ratio": 0.3, "entry_after_bar": 24,
+                "stop_pct": 1.5}},
+        ],
+        "US.SOXL": [
+            {"name": "afternoon_ext", "params": {
+                "move_threshold_pct": 1.5, "entry_bar_idx": 36,
+                "stop_pct": 1.0}},
+            {"name": "vol_squeeze", "params": {
+                "squeeze_ratio": 0.3, "entry_after_bar": 24,
+                "stop_pct": 1.5}},
         ],
     }
 
@@ -510,12 +524,66 @@ class MultiStrategyTrader:
             "target": None,
         }
 
+    def _eval_afternoon_ext(self, df, params) -> Optional[dict]:
+        """Afternoon momentum extension: earlier entry (1pm) on up days."""
+        move_thresh = params.get("move_threshold_pct", 1.5)
+        entry_idx = params.get("entry_bar_idx", 36)
+        if len(df) <= entry_idx:
+            return None
+
+        open_price = df["open"].iloc[0]
+        price_now = df["close"].iloc[entry_idx]
+        move_pct = (price_now - open_price) / open_price * 100
+
+        if move_pct < move_thresh:
+            return None
+
+        return {
+            "strength": 65,
+            "reason": f"Afternoon ext (up {move_pct:.1f}% at bar {entry_idx})",
+            "stop": price_now * (1 - params.get("stop_pct", 1.0) / 100),
+            "target": None,
+        }
+
+    def _eval_vol_squeeze(self, df, params) -> Optional[dict]:
+        """Volatility squeeze breakout: low range first 2hrs then breakout."""
+        squeeze_ratio = params.get("squeeze_ratio", 0.5)
+        entry_after = params.get("entry_after_bar", 24)
+        if len(df) < entry_after + 5:
+            return None
+
+        first_2hr = df.iloc[:entry_after]
+        range_2hr = first_2hr["high"].max() - first_2hr["low"].min()
+        if range_2hr <= 0:
+            return None
+
+        avg_bar_range = (df["high"] - df["low"]).mean()
+        if avg_bar_range <= 0:
+            return None
+
+        if range_2hr / avg_bar_range > squeeze_ratio * entry_after:
+            return None
+
+        breakout_level = first_2hr["high"].max()
+        latest_close = df["close"].iloc[-1]
+        if latest_close <= breakout_level:
+            return None
+
+        return {
+            "strength": 70,
+            "reason": f"Vol squeeze breakout (range {range_2hr:.2f}, break {breakout_level:.2f})",
+            "stop": latest_close * (1 - params.get("stop_pct", 1.5) / 100),
+            "target": None,
+        }
+
     _INTRADAY_EVAL = {
         "orb": "_eval_orb",
         "vwap_trend": "_eval_vwap_trend",
         "first_pullback": "_eval_first_pullback",
         "gap_reversion": "_eval_gap_reversion",
         "rebalance_2pm": "_eval_rebalance_2pm",
+        "afternoon_ext": "_eval_afternoon_ext",
+        "vol_squeeze": "_eval_vol_squeeze",
     }
 
     def _evaluate_intraday_entry(self) -> Optional[dict]:
@@ -931,7 +999,7 @@ class MultiStrategyTrader:
         print(f"FUTU-QUANT Multi-Strategy Live Trading")
         print(f"Mode:       {'DRY-RUN' if self.dry_run else '*** REAL MONEY ***'}")
         print(f"Symbols:    {sym_list}")
-        print(f"Strategies: {n_strats} swing + intraday (ORB/VWAP/Pullback/Gap/Rebal)")
+        print(f"Strategies: {n_strats} swing + intraday (Rebal/AfternoonExt/VolSqueeze)")
         print(f"Regime:     VIX/ADX/VolTarget/Drawdown Governor enabled")
         print(f"Capital:    ${self.config['account']['initial_capital']:,.0f}")
         print(f"PDT:        {self.pdt.remaining_day_trades()}/{self.pdt.max_day_trades} remaining")

@@ -118,11 +118,23 @@
 - [x] 实盘日内配置更新为仅 Rebalance_2pm + VWAP_Trend（TQQQ only）
 - [x] 编译通过 + 45 tests 全部通过
 
+### 新策略研究 + 分段验证（AutoDL 服务器执行）
+- [x] run_segmented_validation.py：10yr/5yr/3yr 分段 + COVID/加息/AI牛市压力测试 + 滚动 WF
+- [x] 新增 4 个标的日线数据：QLD/SPXL/UPRO/TNA（各 2511 bars）
+- [x] GitHub 仓库创建 + AutoDL 远程测试环境搭建
+- [x] Swing 策略研究（S1~S5 + 原有策略）：**全部 FAIL**（最高 Sharpe 0.83）
+- [x] 日内策略研究（I1~I3 + 已有策略）：
+  - I2_Afternoon_Ext (1.5%/36bar): TQQQ Sharpe **3.89**, SOXL **4.28**, 全 6 标的 PASS
+  - I3_Vol_Squeeze (0.5/24bar/1%): TQQQ Sharpe **9.77**, SOXL **9.84**（⚠️ 合成数据可能高估）
+  - Rebalance_2pm (1.0%/48bar): TQQQ Sharpe **3.25**, QLD **3.61**, 5 标的 PASS
+- [x] 通过策略部署到 run_live.py：TQQQ 3 个日内 + SOXL 2 个日内
+- [x] 期权策略研究报告：$3,000 账户仅 Long Call 替代可行，暂不自动化
+
 ## 待开发 📋
 
 ### 策略深化
-- [ ] 期权交易支持
-- [ ] 更多策略模板（季节性因子、情绪指标、跨资产动量）
+- [ ] 真实 5min 数据验证 Vol_Squeeze（需 Alpha Vantage API key）
+- [ ] 期权交易支持（账户增长到 $10,000+ 后考虑）
 - [ ] 资金拆分模式（split mode）支持同时持仓多个标的
 
 ### 第四阶段：AI/ML 增强
