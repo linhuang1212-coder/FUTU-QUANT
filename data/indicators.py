@@ -83,3 +83,45 @@ class TechnicalIndicators:
         df = TechnicalIndicators.add_vwap(df)
         df = TechnicalIndicators.add_obv(df)
         return df
+
+    @staticmethod
+    def resample_kline(
+        df: pd.DataFrame,
+        rule: str,
+        time_col: str = "time_key",
+    ) -> pd.DataFrame:
+        """Resample OHLCV data to a coarser timeframe.
+
+        Args:
+            df: DataFrame with OHLCV columns and a datetime-like *time_col*.
+            rule: A pandas offset alias, e.g. '5min', '15min', '1h', '1W', '1M'.
+            time_col: Name of the datetime column (will be used as the resample
+                      index and restored afterwards).
+
+        Returns:
+            A new DataFrame resampled to *rule* with proper OHLCV aggregation.
+            Rows where volume == 0 (no trading) are dropped.
+        """
+        src = df.copy()
+        src[time_col] = pd.to_datetime(src[time_col])
+        src = src.set_index(time_col).sort_index()
+
+        agg = {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+
+        available = {c: agg[c] for c in agg if c in src.columns}
+        resampled = src.resample(rule).agg(available).dropna(subset=["close"])
+
+        if "volume" in resampled.columns:
+            resampled = resampled[resampled["volume"] > 0]
+
+        resampled = resampled.reset_index().rename(columns={"index": time_col})
+        if time_col not in resampled.columns and resampled.index.name == time_col:
+            resampled = resampled.reset_index()
+
+        return resampled
