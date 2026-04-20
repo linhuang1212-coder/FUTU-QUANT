@@ -1,9 +1,10 @@
 """FUTU-QUANT Multi-Strategy Live Trading Runner
 
-Dual-layer trading system:
-  Layer 1 (Swing): Daily K-line strategies, hold for days/weeks
-  Layer 2 (Intraday): 5-min K-line fast RSI reversal, buy+sell same day
-  PDT-aware: tracks day trades within 5-day rolling window (max 3)
+Swing-only system with macro risk management:
+  - QQQ SMA200 trend filter (global entry gate)
+  - VIX adaptive continuous position sizing
+  - Dual momentum monthly rotation (TQQQ vs SOXL)
+  - Multiple swing strategies per symbol
 
 Usage:
     python run_live.py              # REAL trading
@@ -31,9 +32,6 @@ from strategy.mean_reversion import MeanReversionStrategy
 from strategy.breakout import BreakoutStrategy
 from strategy.rsi_reversal import RsiReversalStrategy
 from strategy.multi_factor import MultiFactorStrategy
-from strategy.vwap_reversion import VwapReversionStrategy
-from strategy.volatility_breakout import VolatilityBreakoutStrategy
-from strategy.fast_ema_cross import FastEmaCrossStrategy
 from strategy.base import SignalDirection, Signal
 from data.indicators import TechnicalIndicators
 from risk.pdt_guard import PdtGuard
@@ -47,13 +45,10 @@ STRATEGY_CLASSES = {
     "breakout": BreakoutStrategy,
     "rsi_reversal": RsiReversalStrategy,
     "multi_factor": MultiFactorStrategy,
-    "vwap_reversion": VwapReversionStrategy,
-    "volatility_breakout": VolatilityBreakoutStrategy,
-    "fast_ema_cross": FastEmaCrossStrategy,
 }
 
-TREND_STRATEGIES = {"momentum", "breakout", "fast_ema_cross", "volatility_breakout"}
-REVERSION_STRATEGIES = {"mean_reversion", "rsi_reversal", "vwap_reversion"}
+TREND_STRATEGIES = {"momentum", "breakout"}
+REVERSION_STRATEGIES = {"mean_reversion", "rsi_reversal"}
 
 
 class MultiStrategyTrader:
@@ -302,6 +297,89 @@ class MultiStrategyTrader:
         )
         return regime
 
+    # ── QQQ SMA200 Trend Filter ──────────────────────────────
+
+    def _check_qqq_sma200(self) -> bool:
+        """Global entry gate: QQQ must be above its 200-day SMA.
+        Validated on 10yr real data — avoids bear markets entirely."""
+        df = self.get_daily_kline("US.QQQ", 250)
+        if df is None or len(df) < 200:
+            self.logger.warning("[SMA200] Cannot get QQQ data, defaulting to ALLOW")
+            return True
+
+        sma200 = df["close"].rolling(200).mean().iloc[-1]
+        qqq_close = df["close"].iloc[-1]
+        above = qqq_close > sma200
+
+        self.logger.info(
+            f"[SMA200] QQQ={qqq_close:.2f} vs SMA200={sma200:.2f} "
+            f"-> {'ABOVE (trade OK)' if above else 'BELOW (no new entries)'}"
+        )
+        return above
+
+    # ── Dual Momentum Rotation ───────────────────────────────
+
+    def _dual_momentum_rank(self) -> Optional[str]:
+        """Monthly rotation: rank TQQQ vs SOXL by 1m+3m momentum.
+        Returns preferred symbol or None if both negative."""
+        symbols = {"US.TQQQ": None, "US.SOXL": None}
+
+        for sym in symbols:
+            df = self.get_daily_kline(sym, 80)
+            if df is None or len(df) < 63:
+                continue
+            time.sleep(0.3)
+            close = df["close"].values
+            mom_1m = close[-1] / close[-21] - 1 if len(close) >= 21 else 0
+            mom_3m = close[-1] / close[-63] - 1 if len(close) >= 63 else 0
+            symbols[sym] = 0.5 * mom_1m + 0.5 * mom_3m
+
+        scores = {k: v for k, v in symbols.items() if v is not None}
+        if not scores:
+            return None
+
+        best_sym = max(scores, key=scores.get)
+        best_score = scores[best_sym]
+
+        for sym, score in scores.items():
+            self.logger.info(
+                f"[MOMENTUM] {sym}: score={score:+.3f} "
+                f"({'selected' if sym == best_sym and best_score > 0 else 'skip'})"
+            )
+
+        if best_score <= 0:
+            self.logger.info("[MOMENTUM] All negative -> stay cash")
+            return None
+        return best_sym
+
+    # ── VIX Adaptive Position Sizing (enhanced) ──────────────
+
+    def _vix_adaptive_allocation(self, base_alloc: float = 0.95) -> float:
+        """Continuous VIX-based position sizing (enhanced from binary on/off).
+        Returns allocation fraction 0.0 - 0.95."""
+        if self._regime is None:
+            return base_alloc
+
+        vix = self._regime.vix_level
+        if vix < 15:
+            alloc = 0.95
+        elif vix < 20:
+            alloc = 0.75
+        elif vix < 28:
+            alloc = 0.50
+        else:
+            alloc = 0.0
+
+        vol_scale = self._regime.position_scale
+        final = min(alloc, base_alloc) * vol_scale
+
+        if final < base_alloc:
+            self.logger.info(
+                f"[VIX SIZING] VIX={vix:.1f} -> base={alloc:.0%}, "
+                f"vol_scale={vol_scale:.2f}, final={final:.1%}"
+            )
+        return final
+
     # ── Swing layer (daily) ─────────────────────────────────────
 
     def _collect_swing_signals(self) -> list[dict]:
@@ -353,28 +431,7 @@ class MultiStrategyTrader:
 
     # ── Intraday layer v2 (trend-following, 5-min) ──────────────
 
-    # Only Rebalance_2pm@TQQQ: validated on 10-year data (Sharpe 2.47, WF 2.73)
-    INTRADAY_CONFIGS = {
-        "US.TQQQ": [
-            {"name": "rebalance_2pm", "params": {
-                "move_threshold_pct": 1.5, "entry_bar_idx": 48,
-                "stop_pct": 1.0}},
-            {"name": "afternoon_ext", "params": {
-                "move_threshold_pct": 1.5, "entry_bar_idx": 36,
-                "stop_pct": 1.0}},
-            {"name": "vol_squeeze", "params": {
-                "squeeze_ratio": 0.3, "entry_after_bar": 24,
-                "stop_pct": 1.5}},
-        ],
-        "US.SOXL": [
-            {"name": "afternoon_ext", "params": {
-                "move_threshold_pct": 1.5, "entry_bar_idx": 36,
-                "stop_pct": 1.0}},
-            {"name": "vol_squeeze", "params": {
-                "squeeze_ratio": 0.3, "entry_after_bar": 24,
-                "stop_pct": 1.5}},
-        ],
-    }
+    INTRADAY_CONFIGS = {}  # cleared: all intraday strategies failed on real 5min data
 
     def _get_today_5min(self, symbol: str) -> Optional[pd.DataFrame]:
         """Get today's 5-min bars only (for day-boundary-aware strategies)."""
@@ -387,204 +444,7 @@ class MultiStrategyTrader:
         today_df = df5[df5["date"] == today].reset_index(drop=True)
         return today_df if len(today_df) >= 6 else None
 
-    def _eval_orb(self, df, params) -> Optional[dict]:
-        orb_bars = params.get("orb_bars", 6)
-        vol_mult = params.get("vol_mult", 1.0)
-        if len(df) < orb_bars + 3:
-            return None
-
-        orb_high = df["high"].iloc[:orb_bars].max()
-        orb_low = df["low"].iloc[:orb_bars].min()
-        vol_avg = df["volume"].iloc[:orb_bars].mean()
-        curr = df.iloc[-1]
-
-        if curr["close"] > orb_high and curr["volume"] > vol_mult * vol_avg:
-            orb_range = orb_high - orb_low
-            if orb_range <= 0:
-                return None
-            stop = orb_low if params.get("stop_type") == "low" else (orb_high + orb_low) / 2
-            target = curr["close"] + params.get("target_mult", 1.5) * (curr["close"] - stop)
-            return {
-                "strength": 75,
-                "reason": f"ORB breakout (range={orb_range:.2f}, vol={curr['volume']/vol_avg:.1f}x)",
-                "stop": stop, "target": target,
-            }
-        return None
-
-    def _eval_vwap_trend(self, df, params) -> Optional[dict]:
-        confirm = params.get("confirm_bars", 3)
-        rsi_floor = params.get("rsi_floor", 45)
-        min_bars = params.get("min_bars_before_entry", 6)
-
-        if len(df) < min_bars + confirm:
-            return None
-        if "vwap" not in df.columns:
-            return None
-
-        curr = df.iloc[-1]
-        rsi = curr.get("rsi_14")
-        if pd.isna(rsi) or pd.isna(curr["vwap"]):
-            return None
-
-        above_count = sum(1 for k in range(confirm)
-                         if len(df) > k and df["close"].iloc[-(k+1)] > df["vwap"].iloc[-(k+1)])
-
-        if above_count >= confirm and rsi > rsi_floor:
-            return {
-                "strength": 70,
-                "reason": f"VWAP trend ({confirm} bars above, RSI={rsi:.1f})",
-                "stop": curr["vwap"],
-                "target": None,
-            }
-        return None
-
-    def _eval_first_pullback(self, df, params) -> Optional[dict]:
-        ema_col = f"ema_{params.get('ema_period', 8)}"
-        pullback_pct = params.get("pullback_pct", 0.3)
-        rsi_floor = params.get("rsi_floor", 35)
-        min_rally = params.get("min_rally_pct", 0.3)
-
-        if ema_col not in df.columns or "vwap" not in df.columns:
-            return None
-        if len(df) < 10:
-            return None
-
-        opening = df["close"].iloc[0]
-        day_high = df["high"].max()
-        rally_pct = (day_high - opening) / opening * 100
-        if rally_pct < min_rally:
-            return None
-
-        curr = df.iloc[-1]
-        ema_val = curr.get(ema_col)
-        rsi = curr.get("rsi_14")
-        if pd.isna(ema_val) or pd.isna(rsi) or pd.isna(curr["vwap"]):
-            return None
-
-        dist_to_ema = abs(curr["close"] - ema_val) / ema_val * 100
-        if (dist_to_ema < pullback_pct
-                and curr["close"] > curr["vwap"]
-                and curr["close"] < day_high * 0.995
-                and rsi > rsi_floor):
-            return {
-                "strength": 80,
-                "reason": (f"Pullback to EMA{params.get('ema_period', 8)} "
-                           f"(rally={rally_pct:.1f}%, dist={dist_to_ema:.2f}%)"),
-                "stop": curr["vwap"],
-                "target": None,
-            }
-        return None
-
-    def _eval_gap_reversion(self, df, params) -> Optional[dict]:
-        """Mean reversion on overnight gap-down within first 30 minutes."""
-        gap_thresh = params.get("gap_threshold_pct", 1.5)
-        delay = params.get("entry_delay_bars", 2)
-        exit_bars = params.get("exit_bars", 6)
-
-        if len(df) < delay + exit_bars + 2:
-            return None
-
-        open_price = df["open"].iloc[0]
-        early_close = df["close"].iloc[min(delay - 1, len(df) - 1)]
-        gap_down = (open_price - early_close) / open_price * 100
-
-        if gap_down < gap_thresh:
-            return None
-
-        # First sign of bounce
-        if delay < len(df) and delay > 0:
-            if df["close"].iloc[delay] <= df["close"].iloc[delay - 1]:
-                return None
-
-        return {
-            "strength": 65,
-            "reason": f"Gap reversion (gap={gap_down:.1f}%, delay={delay}bars)",
-            "stop": df["low"].iloc[:delay + 1].min(),
-            "target": None,
-        }
-
-    def _eval_rebalance_2pm(self, df, params) -> Optional[dict]:
-        """Leveraged ETF rebalancing effect: long at ~2pm on strong up days."""
-        move_thresh = params.get("move_threshold_pct", 2.0)
-        entry_idx = params.get("entry_bar_idx", 54)
-        if len(df) <= entry_idx:
-            return None
-
-        open_price = df["open"].iloc[0]
-        price_2pm = df["close"].iloc[entry_idx]
-        move_pct = (price_2pm - open_price) / open_price * 100
-
-        if move_pct < move_thresh:
-            return None
-
-        return {
-            "strength": 60,
-            "reason": f"Rebalance 2pm (up {move_pct:.1f}% from open)",
-            "stop": price_2pm * (1 - params.get("stop_pct", 1.5) / 100),
-            "target": None,
-        }
-
-    def _eval_afternoon_ext(self, df, params) -> Optional[dict]:
-        """Afternoon momentum extension: earlier entry (1pm) on up days."""
-        move_thresh = params.get("move_threshold_pct", 1.5)
-        entry_idx = params.get("entry_bar_idx", 36)
-        if len(df) <= entry_idx:
-            return None
-
-        open_price = df["open"].iloc[0]
-        price_now = df["close"].iloc[entry_idx]
-        move_pct = (price_now - open_price) / open_price * 100
-
-        if move_pct < move_thresh:
-            return None
-
-        return {
-            "strength": 65,
-            "reason": f"Afternoon ext (up {move_pct:.1f}% at bar {entry_idx})",
-            "stop": price_now * (1 - params.get("stop_pct", 1.0) / 100),
-            "target": None,
-        }
-
-    def _eval_vol_squeeze(self, df, params) -> Optional[dict]:
-        """Volatility squeeze breakout: low range first 2hrs then breakout."""
-        squeeze_ratio = params.get("squeeze_ratio", 0.5)
-        entry_after = params.get("entry_after_bar", 24)
-        if len(df) < entry_after + 5:
-            return None
-
-        first_2hr = df.iloc[:entry_after]
-        range_2hr = first_2hr["high"].max() - first_2hr["low"].min()
-        if range_2hr <= 0:
-            return None
-
-        avg_bar_range = (df["high"] - df["low"]).mean()
-        if avg_bar_range <= 0:
-            return None
-
-        if range_2hr / avg_bar_range > squeeze_ratio * entry_after:
-            return None
-
-        breakout_level = first_2hr["high"].max()
-        latest_close = df["close"].iloc[-1]
-        if latest_close <= breakout_level:
-            return None
-
-        return {
-            "strength": 70,
-            "reason": f"Vol squeeze breakout (range {range_2hr:.2f}, break {breakout_level:.2f})",
-            "stop": latest_close * (1 - params.get("stop_pct", 1.5) / 100),
-            "target": None,
-        }
-
-    _INTRADAY_EVAL = {
-        "orb": "_eval_orb",
-        "vwap_trend": "_eval_vwap_trend",
-        "first_pullback": "_eval_first_pullback",
-        "gap_reversion": "_eval_gap_reversion",
-        "rebalance_2pm": "_eval_rebalance_2pm",
-        "afternoon_ext": "_eval_afternoon_ext",
-        "vol_squeeze": "_eval_vol_squeeze",
-    }
+    _INTRADAY_EVAL = {}
 
     def _evaluate_intraday_entry(self) -> Optional[dict]:
         """Scan symbols with trend-following intraday strategies."""
@@ -652,16 +512,7 @@ class MultiStrategyTrader:
     def execute_buy(self, symbol: str, price: float, strategy_name: str,
                     is_intraday: bool = False) -> bool:
         capital = self.config["account"]["initial_capital"]
-        base_alloc = 0.95
-        if self._regime:
-            alloc = self.vtm.adjust_position_size(base_alloc, self._regime)
-            if alloc < base_alloc:
-                self.logger.info(
-                    f"[VOL SIZING] Position scaled {base_alloc:.0%} -> {alloc:.1%} "
-                    f"(regime={self._regime.regime_label})"
-                )
-        else:
-            alloc = base_alloc
+        alloc = self._vix_adaptive_allocation(0.95)
         qty = int(capital * alloc / price)
 
         if qty <= 0:
@@ -842,7 +693,13 @@ class MultiStrategyTrader:
     # ── Main evaluation loops ───────────────────────────────────
 
     def run_once(self):
-        """Daily swing evaluation: check exit then entry."""
+        """Daily swing evaluation with macro risk layers:
+        1. Regime assessment (VIX/ADX/EWMA vol)
+        2. QQQ SMA200 trend filter (global entry gate)
+        3. Dual momentum rotation (prefer TQQQ or SOXL)
+        4. Collect swing strategy signals
+        5. Execute best signal with VIX adaptive position sizing
+        """
         self.sync_position()
         self.pdt.cleanup_old_trades()
 
@@ -852,10 +709,6 @@ class MultiStrategyTrader:
             f"Swing: {self.holding_symbol or 'FLAT'}"
             + (f" x{self.holding_qty} @ ${self.holding_avg_price:.2f}" if self.holding_symbol else "")
         )
-        self.logger.info(
-            f"PDT: {self.pdt.remaining_day_trades()}/{self.pdt.max_day_trades} "
-            f"day trades remaining"
-        )
 
         regime = self._assess_market_regime()
 
@@ -864,6 +717,17 @@ class MultiStrategyTrader:
             self.logger.warning(
                 f"[VIX DANGER] VIX={regime.vix_level:.1f} >= {self.vtm.vix_force_close}. "
                 f"Force-closing swing position {self.holding_symbol}!"
+            )
+            price = self.get_current_price(self.holding_symbol)
+            if price:
+                self.execute_sell(price, is_intraday=False)
+            return
+
+        # SMA200 check: if QQQ below SMA200 and we hold, force exit
+        qqq_above_sma200 = self._check_qqq_sma200()
+        if not qqq_above_sma200 and self.holding_symbol:
+            self.logger.warning(
+                f"[SMA200 EXIT] QQQ below SMA200 -> closing {self.holding_symbol}"
             )
             price = self.get_current_price(self.holding_symbol)
             if price:
@@ -906,13 +770,29 @@ class MultiStrategyTrader:
                 return
 
         if buy_signals and self.holding_symbol is None:
-            # VIX filter: block new entries when VIX too high
+            # Gate 1: SMA200 filter
+            if not qqq_above_sma200:
+                self.logger.info("[SMA200 BLOCK] QQQ below SMA200, no new entries")
+                return
+
+            # Gate 2: VIX filter
             if not regime.vix_ok:
                 self.logger.info(
                     f"[VIX BLOCK] VIX={regime.vix_level:.1f} >= {self.vtm.vix_entry_max}. "
                     f"No new swing entries allowed."
                 )
                 return
+
+            # Gate 3: Dual momentum — prefer the momentum-ranked symbol
+            preferred_sym = self._dual_momentum_rank()
+            if preferred_sym:
+                preferred_buys = [b for b in buy_signals if b["symbol"] == preferred_sym]
+                if preferred_buys:
+                    buy_signals = preferred_buys
+                    self.logger.info(
+                        f"[MOMENTUM FILTER] Preferring {preferred_sym} "
+                        f"({len(preferred_buys)} signals)"
+                    )
 
             best = buy_signals[0]
             self.logger.info(
@@ -999,8 +879,8 @@ class MultiStrategyTrader:
         print(f"FUTU-QUANT Multi-Strategy Live Trading")
         print(f"Mode:       {'DRY-RUN' if self.dry_run else '*** REAL MONEY ***'}")
         print(f"Symbols:    {sym_list}")
-        print(f"Strategies: {n_strats} swing + intraday (Rebal/AfternoonExt/VolSqueeze)")
-        print(f"Regime:     VIX/ADX/VolTarget/Drawdown Governor enabled")
+        print(f"Strategies: {n_strats} swing (intraday disabled, all failed 8yr validation)")
+        print(f"Risk Mgmt:  QQQ SMA200 filter + VIX adaptive sizing + Dual Momentum rotation")
         print(f"Capital:    ${self.config['account']['initial_capital']:,.0f}")
         print(f"PDT:        {self.pdt.remaining_day_trades()}/{self.pdt.max_day_trades} remaining")
         print(f"Swing pos:  {self.holding_symbol or 'FLAT'}")

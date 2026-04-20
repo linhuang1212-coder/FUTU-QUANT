@@ -16,7 +16,7 @@ SYMBOLS = ["US.TQQQ", "US.SOXL"]
 DATA_DIR = Path("data_store/market_data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-START_DATE = datetime(2024, 1, 1)
+START_DATE = datetime(2018, 5, 1)
 END_DATE = datetime(2026, 4, 18)
 
 
