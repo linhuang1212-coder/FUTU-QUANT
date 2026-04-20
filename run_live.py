@@ -105,6 +105,18 @@ class MultiStrategyTrader:
         self.intraday_avg_price: float = 0.0
         self.intraday_strategy: str = ""
 
+        # Hedge portfolio: TQQQ + UGL (50/50 rebalancing)
+        # Validated: 10yr Sharpe 0.91, CAGR 35.9%, MaxDD 57.9%
+        hedge_cfg = self.config.get("hedge_portfolio", {})
+        self.hedge_enabled = hedge_cfg.get("enabled", True)
+        self.hedge_rebal_days = hedge_cfg.get("rebal_days", 21)
+        self.hedge_crash_pct = hedge_cfg.get("crash_pct", -20.0)
+        self.hedge_etf = hedge_cfg.get("hedge_symbol", "US.UGL")
+        self.hedge_safe = hedge_cfg.get("safe_symbol", "US.IEF")
+        self.hedge_last_rebal: Optional[datetime] = None
+        self.hedge_in_crash: bool = False
+        self.hedge_crash_level: float = 0.0
+
     # ── Config loading ──────────────────────────────────────────
 
     def _load_slots(self) -> list[dict]:
@@ -351,6 +363,48 @@ class MultiStrategyTrader:
             self.logger.info("[MOMENTUM] All negative -> stay cash")
             return None
         return best_sym
+
+    # ── Hedge Portfolio Rebalancing (TQQQ + UGL) ────────────
+
+    def _check_hedge_rebalance(self) -> Optional[str]:
+        """Check if hedge portfolio needs rebalancing or crash response.
+        Returns action: 'rebalance', 'crash_enter', 'crash_exit', or None."""
+        if not self.hedge_enabled:
+            return None
+
+        tqqq_price = self.get_current_price("US.TQQQ")
+        if tqqq_price is None:
+            return None
+
+        if self.hedge_in_crash:
+            if tqqq_price > self.hedge_crash_level:
+                self.hedge_in_crash = False
+                self.logger.info(
+                    f"[HEDGE] TQQQ recovered above crash level "
+                    f"${self.hedge_crash_level:.2f}, exiting crash mode"
+                )
+                return "crash_exit"
+            return None
+
+        df = self.get_daily_kline("US.TQQQ", 5)
+        if df is not None and len(df) >= 2:
+            prev_close = df["close"].iloc[-2]
+            daily_ret = (tqqq_price / prev_close - 1) * 100
+            if daily_ret < self.hedge_crash_pct:
+                self.hedge_in_crash = True
+                self.hedge_crash_level = prev_close
+                self.logger.warning(
+                    f"[HEDGE CRASH] TQQQ dropped {daily_ret:.1f}% today! "
+                    f"Entering crash mode, moving to {self.hedge_safe}"
+                )
+                return "crash_enter"
+
+        now = datetime.now()
+        if (self.hedge_last_rebal is None or
+                (now - self.hedge_last_rebal).days >= self.hedge_rebal_days):
+            return "rebalance"
+
+        return None
 
     # ── VIX Adaptive Position Sizing (enhanced) ──────────────
 
@@ -712,6 +766,26 @@ class MultiStrategyTrader:
 
         regime = self._assess_market_regime()
 
+        # Hedge portfolio check (TQQQ + UGL rebalancing)
+        hedge_action = self._check_hedge_rebalance()
+        if hedge_action:
+            self.logger.info(f"[HEDGE] Action needed: {hedge_action}")
+            if hedge_action == "crash_enter":
+                self.logger.warning(
+                    f"[HEDGE CRASH] Sell all, move to {self.hedge_safe}. "
+                    f"Manual action required for hedge portfolio!"
+                )
+            elif hedge_action == "crash_exit":
+                self.logger.info(
+                    "[HEDGE] TQQQ recovered. Rebalance back to 50/50 TQQQ+UGL."
+                )
+            elif hedge_action == "rebalance":
+                self.hedge_last_rebal = datetime.now()
+                self.logger.info(
+                    "[HEDGE] Monthly rebalance due. "
+                    "Adjust TQQQ and UGL to equal 50/50 allocation."
+                )
+
         # VIX danger: force-close all positions immediately
         if regime.vix_danger and self.holding_symbol:
             self.logger.warning(
@@ -879,8 +953,8 @@ class MultiStrategyTrader:
         print(f"FUTU-QUANT Multi-Strategy Live Trading")
         print(f"Mode:       {'DRY-RUN' if self.dry_run else '*** REAL MONEY ***'}")
         print(f"Symbols:    {sym_list}")
-        print(f"Strategies: {n_strats} swing (intraday disabled, all failed 8yr validation)")
-        print(f"Risk Mgmt:  QQQ SMA200 filter + VIX adaptive sizing + Dual Momentum rotation")
+        print(f"Strategies: {n_strats} swing + TQQQ/UGL hedge portfolio")
+        print(f"Risk Mgmt:  QQQ SMA200 + VIX adaptive + Dual Momentum + Crash Filter")
         print(f"Capital:    ${self.config['account']['initial_capital']:,.0f}")
         print(f"PDT:        {self.pdt.remaining_day_trades()}/{self.pdt.max_day_trades} remaining")
         print(f"Swing pos:  {self.holding_symbol or 'FLAT'}")

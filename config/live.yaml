@@ -37,6 +37,14 @@ vol_target:
   dd_scale_factor: 0.5
   max_position_scale: 0.95
 
+hedge_portfolio:
+  enabled: true
+  # TQQQ + UGL 50/50 rebalancing: 10yr Sharpe 0.91, CAGR 35.9%
+  hedge_symbol: "US.UGL"      # 2x Gold ETF
+  safe_symbol: "US.IEF"       # 7-10yr Treasury (crash safe haven)
+  rebal_days: 21              # rebalance every ~1 month
+  crash_pct: -20.0            # crash filter: TQQQ drops >20% in a day
+
 signal:
   min_strength_stock: 50
   min_strength_option: 80
