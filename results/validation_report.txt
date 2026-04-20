@@ -1,0 +1,32 @@
+
+
+======================================================================
+VALIDATION SUMMARY REPORT
+======================================================================
+
+1. INTRADAY 5min RSI STRATEGY:
+   US.TQQQ: Sharpe=-1.9490 Trades=126 WR=54% -> FAIL/INSUFFICIENT
+   US.SOXL: Sharpe=-1.3865 Trades=158 WR=57% -> FAIL/INSUFFICIENT
+   US.TNA: Sharpe=-2.1381 Trades=139 WR=55% -> FAIL/INSUFFICIENT
+
+2. ROLLING WALK-FORWARD:
+   momentum@US.TQQQ: Avg OOS Sharpe=0.8567 Consistency=75% -> PASS
+   momentum@US.SOXL: Avg OOS Sharpe=0.2989 Consistency=50% -> WEAK
+   momentum@US.TNA: Avg OOS Sharpe=0.0869 Consistency=38% -> FAIL
+   mean_reversion@US.TQQQ: Avg OOS Sharpe=0.4232 Consistency=75% -> PASS
+   mean_reversion@US.SOXL: Avg OOS Sharpe=0.3285 Consistency=75% -> PASS
+   mean_reversion@US.TNA: Avg OOS Sharpe=0.1958 Consistency=75% -> PASS
+   rsi_reversal@US.TQQQ: Avg OOS Sharpe=0.1986 Consistency=50% -> WEAK
+   rsi_reversal@US.SOXL: Avg OOS Sharpe=0.3769 Consistency=75% -> PASS
+   rsi_reversal@US.TNA: Avg OOS Sharpe=-0.1267 Consistency=62% -> WEAK
+
+3. MONTE CARLO:
+   momentum@US.TQQQ: Pctile=100th Actual=0.6271 -> PASS
+   momentum@US.SOXL: Pctile=100th Actual=0.6084 -> PASS
+   momentum@US.TNA: Pctile=100th Actual=0.3631 -> PASS
+   rsi_reversal@US.TQQQ: Pctile=100th Actual=0.3147 -> PASS
+   rsi_reversal@US.SOXL: Pctile=100th Actual=0.5457 -> PASS
+   rsi_reversal@US.TNA: Pctile=nanth Actual=0.0366 -> FAIL
+
+4. PARAMETER SENSITIVITY:
+   14/14 parameters are STABLE or MODERATE

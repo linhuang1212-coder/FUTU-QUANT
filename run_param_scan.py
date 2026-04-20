@@ -22,6 +22,7 @@ import pandas as pd
 
 from data.history import HistoryManager
 from data.indicators import TechnicalIndicators
+from data.downloader import load_daily
 from utils.helpers import load_yaml, get_project_root
 
 SYMBOLS = ["US.TQQQ", "US.SOXL", "US.TNA", "US.QQQ", "US.SPY"]
@@ -62,6 +63,7 @@ STRATEGY_GRIDS = {
 
 
 def fetch_all_data(symbols: list[str], start: str = "2015-01-01") -> dict[str, pd.DataFrame]:
+    """Load daily data: local CSV first, then Futu cache, then Futu API."""
     root = get_project_root()
     settings = load_yaml(str(root / "config" / "settings.yaml"))
     hm = HistoryManager()
@@ -70,24 +72,40 @@ def fetch_all_data(symbols: list[str], start: str = "2015-01-01") -> dict[str, p
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = start
 
-    try:
-        from futu import OpenQuoteContext, RET_OK, KLType
-        ctx = OpenQuoteContext(host=settings["futu"]["host"], port=settings["futu"]["port"])
-        connected = True
-    except Exception as e:
-        print(f"[WARN] FutuOpenD unavailable ({e})")
-        ctx = None
-        connected = False
+    ctx = None
+    connected = False
 
     for sym in symbols:
+        # Priority 1: local downloaded CSV
+        ticker = sym.split(".")[-1] if "." in sym else sym
+        local = load_daily(ticker)
+        if local is not None and len(local) >= 500:
+            result[sym] = local
+            print(f"  {sym}: {len(local)} bars (local CSV)")
+            continue
+
+        # Priority 2: Futu cache
         cached = hm.load_from_cache(sym, "K_DAY")
         if cached is not None and len(cached) >= 2000:
-            df = cached
-            print(f"  {sym}: {len(df)} bars (cached)")
-        elif connected and ctx is not None:
+            result[sym] = cached
+            print(f"  {sym}: {len(cached)} bars (Futu cache)")
+            continue
+
+        # Priority 3: Futu API
+        if not connected:
+            try:
+                from futu import OpenQuoteContext, RET_OK, KLType
+                ctx = OpenQuoteContext(host=settings["futu"]["host"],
+                                      port=settings["futu"]["port"])
+                connected = True
+            except Exception as e:
+                print(f"[WARN] FutuOpenD unavailable ({e})")
+
+        if connected and ctx is not None:
             import time as _time
             _time.sleep(0.3)
             try:
+                from futu import RET_OK, KLType
                 all_pages = []
                 page_key = None
                 while True:
@@ -109,15 +127,14 @@ def fetch_all_data(symbols: list[str], start: str = "2015-01-01") -> dict[str, p
                         subset=["time_key"], keep="last"
                     ).sort_values("time_key").reset_index(drop=True)
                     hm.save_to_cache(sym, "K_DAY", df)
-                    print(f"  {sym}: {len(df)} bars (API, {len(all_pages)} pages)")
+                    result[sym] = df
+                    print(f"  {sym}: {len(df)} bars (Futu API, {len(all_pages)} pages)")
                 else:
-                    print(f"  {sym}: insufficient data"); continue
+                    print(f"  {sym}: insufficient data")
             except Exception as e:
-                print(f"  {sym}: error ({e})"); continue
+                print(f"  {sym}: error ({e})")
         else:
-            print(f"  {sym}: no data"); continue
-
-        result[sym] = df
+            print(f"  {sym}: no data")
 
     if ctx is not None:
         ctx.close()
