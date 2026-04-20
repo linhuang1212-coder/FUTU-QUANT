@@ -68,11 +68,13 @@ class Engine:
         from strategy.momentum import MomentumStrategy
         from strategy.mean_reversion import MeanReversionStrategy
         from strategy.breakout import BreakoutStrategy
+        from strategy.rsi_reversal import RsiReversalStrategy
 
         strategy_map = {
             "momentum": MomentumStrategy,
             "mean_reversion": MeanReversionStrategy,
             "breakout": BreakoutStrategy,
+            "rsi_reversal": RsiReversalStrategy,
         }
         for name, cfg in self.strategies_config.get("strategies", {}).items():
             if cfg.get("enabled", False) and name in strategy_map:
