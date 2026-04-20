@@ -61,14 +61,14 @@ STRATEGY_GRIDS = {
 }
 
 
-def fetch_all_data(symbols: list[str], days: int = 365) -> dict[str, pd.DataFrame]:
+def fetch_all_data(symbols: list[str], start: str = "2015-01-01") -> dict[str, pd.DataFrame]:
     root = get_project_root()
     settings = load_yaml(str(root / "config" / "settings.yaml"))
     hm = HistoryManager()
     result = {}
 
     end_date = datetime.now().strftime("%Y-%m-%d")
-    start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    start_date = start
 
     try:
         from futu import OpenQuoteContext, RET_OK, KLType
@@ -81,21 +81,35 @@ def fetch_all_data(symbols: list[str], days: int = 365) -> dict[str, pd.DataFram
 
     for sym in symbols:
         cached = hm.load_from_cache(sym, "K_DAY")
-        if cached is not None and len(cached) >= 200:
+        if cached is not None and len(cached) >= 2000:
             df = cached
             print(f"  {sym}: {len(df)} bars (cached)")
         elif connected and ctx is not None:
             import time as _time
-            _time.sleep(0.5)
+            _time.sleep(0.3)
             try:
-                ret, data, _ = ctx.request_history_kline(
-                    sym, start=start_date, end=end_date,
-                    ktype=KLType.K_DAY, max_count=1000,
-                )
-                if ret == RET_OK and data is not None and len(data) > 50:
-                    df = data
+                all_pages = []
+                page_key = None
+                while True:
+                    kwargs = dict(code=sym, start=start_date, end=end_date,
+                                  ktype=KLType.K_DAY, max_count=1000)
+                    if page_key is not None:
+                        kwargs["page_req_key"] = page_key
+                    ret, data, page_key = ctx.request_history_kline(**kwargs)
+                    if ret == RET_OK and data is not None and len(data) > 0:
+                        all_pages.append(data)
+                    else:
+                        break
+                    if page_key is None:
+                        break
+                    _time.sleep(0.3)
+
+                if all_pages:
+                    df = pd.concat(all_pages, ignore_index=True).drop_duplicates(
+                        subset=["time_key"], keep="last"
+                    ).sort_values("time_key").reset_index(drop=True)
                     hm.save_to_cache(sym, "K_DAY", df)
-                    print(f"  {sym}: {len(df)} bars (API)")
+                    print(f"  {sym}: {len(df)} bars (API, {len(all_pages)} pages)")
                 else:
                     print(f"  {sym}: insufficient data"); continue
             except Exception as e:
