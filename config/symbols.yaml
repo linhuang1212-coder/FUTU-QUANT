@@ -1,0 +1,18 @@
+etf:
+  leveraged:
+    - "US.TQQQ"
+    - "US.SQQQ"
+    - "US.SOXL"
+    - "US.SOXS"
+    - "US.TNA"
+    - "US.TZA"
+  standard:
+    - "US.SPY"
+    - "US.QQQ"
+    - "US.IWM"
+
+stocks: []
+
+options:
+  enabled: false
+  underlyings: []

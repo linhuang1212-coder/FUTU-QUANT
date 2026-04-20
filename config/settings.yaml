@@ -1,0 +1,45 @@
+futu:
+  host: "127.0.0.1"
+  port: 11111
+  trade_env: SIMULATE
+
+account:
+  initial_capital: 3000
+  currency: USD
+
+risk:
+  max_loss_per_trade_pct: 0.05
+  max_daily_loss_pct: 0.08
+  max_position_pct: 0.40
+  max_total_position_pct: 0.80
+  max_consecutive_losses: 3
+  cooldown_minutes: 60
+  trailing_stop:
+    activate_pct: 0.02
+    trail_pct: 0.015
+  hard_stop_pct: 0.05
+  eod_close_minutes_before: 15
+
+pdt:
+  enabled: true
+  max_day_trades: 3
+  rolling_window_days: 5
+
+signal:
+  min_strength_stock: 60
+  min_strength_option: 80
+
+telegram:
+  bot_token: "YOUR_BOT_TOKEN"
+  chat_id: "YOUR_CHAT_ID"
+  enabled: false
+
+logging:
+  level: INFO
+  file: data_store/logs/futu_quant.log
+
+scheduler:
+  market_open: "09:30"
+  market_close: "16:00"
+  timezone: "US/Eastern"
+  bar_interval_seconds: 60
