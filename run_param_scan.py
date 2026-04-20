@@ -184,9 +184,8 @@ def fast_backtest(
         strength = strengths[i]
 
         if sig == 1 and position == 0:
-            alloc = 0.2 if strength < 60 else (0.3 if strength < 70 else (0.4 if strength < 80 else 0.5))
             buy_p = price * (1 + slippage_pct)
-            qty = int(capital * alloc / buy_p)
+            qty = int(capital * 0.95 / buy_p)
             if qty > 0:
                 comm = buy_p * qty * commission_pct
                 cost = buy_p * qty + comm

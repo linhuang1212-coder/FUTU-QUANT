@@ -32,16 +32,12 @@ def _wilder_atr(tr: np.ndarray, period: int = 14) -> np.ndarray:
 
 
 def _allocation_from_strength(strength: float) -> float:
-    """Fraction of capital to allocate to new exposure (long or short notional)."""
-    if strength < 50:
-        return 0.20
-    if strength < 60:
-        return 0.20
-    if strength < 70:
-        return 0.30
-    if strength < 80:
-        return 0.40
-    return 0.50
+    """Fraction of capital to allocate to new exposure (long or short notional).
+
+    For small accounts ($3,000), full deployment maximises capital efficiency.
+    A 5% cash reserve is kept for commission/slippage headroom.
+    """
+    return 0.95
 
 
 class Backtester:
