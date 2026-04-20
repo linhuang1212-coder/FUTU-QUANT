@@ -72,4 +72,5 @@ class Backtester:
             "trades": trades,
             "equity_curve": equity_curve,
             "total_bars": len(data),
+            "data": data,
         }
