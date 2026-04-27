@@ -1,10 +1,11 @@
 """FUTU-QUANT Multi-Strategy Live Trading Runner
 
-Swing-only system with macro risk management:
+Swing-only system with 4-ETF momentum rotation and macro risk management:
+  - 4 leveraged ETFs: TQQQ, SOXL, UPRO, TECL
+  - Momentum rotation: daily rank all 4 ETFs, pick top-2 candidates
   - QQQ SMA200 trend filter (global entry gate)
   - VIX adaptive continuous position sizing
-  - Dual momentum monthly rotation (TQQQ vs SOXL)
-  - Multiple swing strategies per symbol
+  - Multiple swing strategies per symbol (breakout, mean_reversion, multi_factor)
 
 Usage:
     python run_live.py              # REAL trading
@@ -16,7 +17,6 @@ IMPORTANT: Ensure FutuOpenD is running and logged in before starting.
 
 import sys
 import io
-import json
 import time
 import argparse
 from datetime import datetime, timedelta
@@ -34,8 +34,11 @@ from strategy.rsi_reversal import RsiReversalStrategy
 from strategy.multi_factor import MultiFactorStrategy
 from strategy.base import SignalDirection, Signal
 from data.indicators import TechnicalIndicators
+from data.trade_store import TradeStore
 from risk.pdt_guard import PdtGuard
 from risk.vol_target import VolatilityTargetManager, MarketRegime
+from risk.trailing_stop import TrailingStopManager
+from strategy.signal_filter import SignalFilter
 from utils.logger import setup_logger
 from utils.helpers import load_yaml, get_project_root
 
@@ -62,8 +65,7 @@ class MultiStrategyTrader:
             log_name, str(self.root / "data_store" / "logs" / f"{log_name}.log")
         )
 
-        self.trade_log_dir = self.root / "data_store" / "trades"
-        self.trade_log_dir.mkdir(parents=True, exist_ok=True)
+        self.trade_store = TradeStore()
 
         self.slots = self._load_slots()
 
@@ -71,6 +73,7 @@ class MultiStrategyTrader:
         self.pdt = PdtGuard(
             max_day_trades=pdt_cfg.get("max_day_trades", 3),
             rolling_window_days=pdt_cfg.get("rolling_window_days", 5),
+            trade_store=self.trade_store,
         )
         self.pdt_enabled = pdt_cfg.get("enabled", True)
 
@@ -85,11 +88,12 @@ class MultiStrategyTrader:
             vix_reduce_threshold=vtm_cfg.get("vix_reduce_threshold", 22.0),
             adx_trend_threshold=vtm_cfg.get("adx_trend_threshold", 25.0),
             adx_period=vtm_cfg.get("adx_period", 14),
-            vol_target=vtm_cfg.get("vol_target", 0.18),
+            vol_target=vtm_cfg.get("vol_target", 0.50),
             ewma_lambda=vtm_cfg.get("ewma_lambda", 0.94),
             dd_threshold=vtm_cfg.get("dd_threshold", -0.20),
             dd_scale_factor=vtm_cfg.get("dd_scale_factor", 0.5),
             max_position_scale=vtm_cfg.get("max_position_scale", 0.95),
+            min_position_scale=vtm_cfg.get("min_position_scale", 0.15),
         )
         self._regime: Optional[MarketRegime] = None
 
@@ -104,6 +108,20 @@ class MultiStrategyTrader:
         self.intraday_qty: int = 0
         self.intraday_avg_price: float = 0.0
         self.intraday_strategy: str = ""
+
+        # Daily kline cache: {(symbol, min_count): (date_str, DataFrame)}
+        self._kline_cache: dict[tuple[str, int], tuple[str, pd.DataFrame]] = {}
+
+        # Rotation config
+        self.rotation_cfg = self.config.get("rotation", {})
+
+        # Signal filter
+        sf_cfg = self.config.get("signal_filter", {})
+        self.signal_filter = SignalFilter(sf_cfg)
+
+        # Trailing stop
+        ts_cfg = self.config.get("risk", {}).get("trailing_stop", {})
+        self.trailing_stop = TrailingStopManager(ts_cfg)
 
         # Hedge portfolio: TQQQ + UGL (50/50 rebalancing)
         # Validated: 10yr Sharpe 0.91, CAGR 35.9%, MaxDD 57.9%
@@ -221,16 +239,35 @@ class MultiStrategyTrader:
     def get_daily_kline(self, symbol: str, count: int = 60) -> Optional[pd.DataFrame]:
         from futu import RET_OK, KLType
 
-        end_date = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        # Check cache: reuse if same day and cached data has enough rows
+        for (cached_sym, cached_cnt), (cached_date, cached_df) in self._kline_cache.items():
+            if cached_sym == symbol and cached_date == today and len(cached_df) >= count:
+                return cached_df.tail(count).reset_index(drop=True)
+
+        end_date = today
         start_date = (datetime.now() - timedelta(days=count * 2)).strftime("%Y-%m-%d")
 
-        ret, data, _ = self._quote_ctx.request_history_kline(
-            symbol, start=start_date, end=end_date,
-            ktype=KLType.K_DAY, max_count=count,
-        )
-        if ret == RET_OK and data is not None and len(data) >= 20:
-            return data
-        self.logger.error(f"Failed to get daily kline for {symbol}")
+        max_retries = 3
+        for attempt in range(max_retries):
+            time.sleep(0.5)
+            ret, data, _ = self._quote_ctx.request_history_kline(
+                symbol, start=start_date, end=end_date,
+                ktype=KLType.K_DAY, max_count=count,
+            )
+            if ret == RET_OK and data is not None and len(data) >= 20:
+                self._kline_cache[(symbol, count)] = (today, data)
+                return data
+            if attempt < max_retries - 1:
+                wait = 1.0 * (attempt + 1)
+                self.logger.warning(
+                    f"Retrying get_daily_kline({symbol}) in {wait:.0f}s "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(wait)
+
+        self.logger.error(f"Failed to get daily kline for {symbol} after {max_retries} retries")
         return None
 
     def get_5min_kline(self, symbol: str, count: int = 60) -> Optional[pd.DataFrame]:
@@ -291,7 +328,7 @@ class MultiStrategyTrader:
         vix = self.vtm.get_vix_level(self._quote_ctx) if self._quote_ctx else None
 
         ref_symbol = self._all_symbols()[0] if self._all_symbols() else "US.TQQQ"
-        df = self.get_daily_kline(ref_symbol, 60)
+        df = self.get_daily_kline(ref_symbol, 120)
         if df is not None and len(df) >= 30:
             adx = self.vtm.compute_adx(df)
             ewma_vol = self.vtm.compute_ewma_vol(df)
@@ -329,40 +366,82 @@ class MultiStrategyTrader:
         )
         return above
 
-    # ── Dual Momentum Rotation ───────────────────────────────
+    # ── Momentum Rotation Ranking ────────────────────────────
 
-    def _dual_momentum_rank(self) -> Optional[str]:
-        """Monthly rotation: rank TQQQ vs SOXL by 1m+3m momentum.
-        Returns preferred symbol or None if both negative."""
-        symbols = {"US.TQQQ": None, "US.SOXL": None}
+    def _momentum_rotation_rank(self) -> tuple[list[str], dict[str, float]]:
+        """Rank all pool symbols by risk-adjusted momentum with hysteresis.
+        Returns (top-N candidates, {symbol: score} dict)."""
+        cfg = self.rotation_cfg
+        w1m = cfg.get("momentum_weights", {}).get("mom_1m", 0.5)
+        w3m = cfg.get("momentum_weights", {}).get("mom_3m", 0.5)
+        min_mom = cfg.get("min_momentum", 0.0)
+        risk_adjust = cfg.get("risk_adjust", True)
+        vol_lookback = cfg.get("vol_lookback", 21)
+        hysteresis = cfg.get("hysteresis_pct", 0.03)
 
-        for sym in symbols:
+        if cfg.get("dynamic_candidates", False) and self._regime:
+            adx = self._regime.adx_value
+            if adx >= cfg.get("high_trend_adx", 30):
+                top_n = 1
+            elif adx <= cfg.get("low_trend_adx", 20):
+                top_n = min(3, len(self._all_symbols()))
+            else:
+                top_n = cfg.get("candidate_count", 2)
+        else:
+            top_n = cfg.get("candidate_count", 2)
+
+        scores: dict[str, float] = {}
+        for sym in self._all_symbols():
             df = self.get_daily_kline(sym, 80)
             if df is None or len(df) < 63:
                 continue
-            time.sleep(0.3)
             close = df["close"].values
             mom_1m = close[-1] / close[-21] - 1 if len(close) >= 21 else 0
             mom_3m = close[-1] / close[-63] - 1 if len(close) >= 63 else 0
-            symbols[sym] = 0.5 * mom_1m + 0.5 * mom_3m
+            raw_mom = w1m * mom_1m + w3m * mom_3m
 
-        scores = {k: v for k, v in symbols.items() if v is not None}
+            if risk_adjust and len(close) >= vol_lookback:
+                import numpy as np
+                rets = pd.Series(close).pct_change().dropna().tail(vol_lookback)
+                vol = float(rets.std() * np.sqrt(252)) if len(rets) > 5 else 1.0
+                scores[sym] = raw_mom / max(vol, 0.01)
+            else:
+                scores[sym] = raw_mom
+
         if not scores:
-            return None
+            return [], {}
 
-        best_sym = max(scores, key=scores.get)
-        best_score = scores[best_sym]
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
-        for sym, score in scores.items():
-            self.logger.info(
-                f"[MOMENTUM] {sym}: score={score:+.3f} "
-                f"({'selected' if sym == best_sym and best_score > 0 else 'skip'})"
-            )
+        # Hysteresis: current holding stays unless significantly outperformed
+        if self.holding_symbol and self.holding_symbol in scores:
+            held_score = scores[self.holding_symbol]
+            top_score = ranked[0][1] if ranked else 0
+            if held_score > 0 and (top_score - held_score) < hysteresis:
+                candidates = [self.holding_symbol]
+                for sym, sc in ranked:
+                    if sym != self.holding_symbol and sc > min_mom:
+                        candidates.append(sym)
+                        if len(candidates) >= top_n:
+                            break
+                for i, (sym, score) in enumerate(ranked):
+                    tag = "HOLD" if sym == self.holding_symbol else (
+                        "TOP" if sym in candidates else "skip"
+                    )
+                    self.logger.info(
+                        f"[ROTATION] #{i+1} {sym}: score={score:+.3f} ({tag})"
+                    )
+                return candidates, scores
 
-        if best_score <= 0:
-            self.logger.info("[MOMENTUM] All negative -> stay cash")
-            return None
-        return best_sym
+        for i, (sym, score) in enumerate(ranked):
+            tag = "TOP" if i < top_n and score > min_mom else "skip"
+            self.logger.info(f"[ROTATION] #{i+1} {sym}: score={score:+.3f} ({tag})")
+
+        candidates = [sym for sym, score in ranked[:top_n] if score > min_mom]
+        if not candidates:
+            self.logger.info("[ROTATION] All momentum negative -> stay cash")
+
+        return candidates, scores
 
     # ── Hedge Portfolio Rebalancing (TQQQ + UGL) ────────────
 
@@ -436,15 +515,26 @@ class MultiStrategyTrader:
 
     # ── Swing layer (daily) ─────────────────────────────────────
 
-    def _collect_swing_signals(self) -> list[dict]:
+    def _collect_swing_signals(
+        self, candidate_symbols: Optional[set[str]] = None
+    ) -> list[dict]:
+        """Collect swing signals. If candidate_symbols is provided,
+        only BUY signals from those symbols are kept (SELL signals
+        always pass through for exit management)."""
         regime = self._regime
         results = []
         for slot in self.slots:
             code = slot["code"]
+
+            # Skip API calls entirely for non-candidate symbols (save quota)
+            if candidate_symbols is not None and code not in candidate_symbols:
+                # Still need to evaluate held symbol for SELL signals
+                if code != self.holding_symbol:
+                    continue
+
             df = self.get_daily_kline(code, 60)
             if df is None:
                 continue
-            time.sleep(0.3)
             df = self._precompute_indicators(df)
             for strat_cfg in slot["strategies"]:
                 sname = strat_cfg["name"]
@@ -455,6 +545,12 @@ class MultiStrategyTrader:
                     self.logger.error(f"Strategy {sname}@{code} error: {e}")
                     continue
                 if signal is None:
+                    continue
+
+                # Filter BUY signals from non-candidate symbols
+                if (candidate_symbols is not None
+                        and signal.direction == SignalDirection.BUY
+                        and code not in candidate_symbols):
                     continue
 
                 # ADX filter: block trend-strategy BUY when market is not trending
@@ -481,6 +577,17 @@ class MultiStrategyTrader:
                     f"{signal.direction.value} str={signal.strength:.1f} "
                     f"score={score:.1f} | {signal.reason}"
                 )
+
+        # Apply signal quality filter
+        if self.signal_filter.enabled:
+            pre_count = len(results)
+            adx_val = self._regime.adx_value if self._regime else 0.0
+            results = self.signal_filter.filter_signals(results, adx=adx_val)
+            if pre_count != len(results):
+                self.logger.info(
+                    f"  [FILTER] {pre_count} raw -> {len(results)} after quality filter"
+                )
+
         return results
 
     # ── Intraday layer v2 (trend-following, 5-min) ──────────────
@@ -561,12 +668,41 @@ class MultiStrategyTrader:
 
         return None
 
+    # ── Dynamic position sizing ─────────────────────────────────
+
+    def _compute_dynamic_allocation(
+        self, signal_strength: float = 70.0, momentum_score: float = 0.0
+    ) -> float:
+        """Compute allocation based on signal strength and momentum score."""
+        ps_cfg = self.config.get("position_sizing", {})
+        if not ps_cfg.get("enabled", False):
+            return self._vix_adaptive_allocation(0.95)
+
+        base = ps_cfg.get("base_allocation", 0.72)
+        str_bonus = ps_cfg.get("strength_bonus", 0.20)
+        mom_bonus = ps_cfg.get("momentum_bonus", 0.15)
+        max_alloc = ps_cfg.get("max_allocation", 0.95)
+        min_alloc = ps_cfg.get("min_allocation", 0.40)
+
+        alloc = base + (signal_strength / 100.0) * str_bonus
+
+        if momentum_score > 0:
+            alloc *= (1.0 + momentum_score * mom_bonus)
+
+        alloc = max(min_alloc, min(alloc, max_alloc))
+
+        regime_scale = self._regime.position_scale if self._regime else 1.0
+        final = alloc * regime_scale
+        return max(min_alloc * 0.5, min(final, max_alloc))
+
     # ── Order execution ─────────────────────────────────────────
 
     def execute_buy(self, symbol: str, price: float, strategy_name: str,
-                    is_intraday: bool = False) -> bool:
+                    is_intraday: bool = False,
+                    signal_strength: float = 70.0,
+                    momentum_score: float = 0.0) -> bool:
         capital = self.config["account"]["initial_capital"]
-        alloc = self._vix_adaptive_allocation(0.95)
+        alloc = self._compute_dynamic_allocation(signal_strength, momentum_score)
         qty = int(capital * alloc / price)
 
         if qty <= 0:
@@ -589,6 +725,7 @@ class MultiStrategyTrader:
                 self.holding_qty = qty
                 self.holding_avg_price = price
                 self.holding_strategy = strategy_name
+                self.trailing_stop.on_entry(symbol, price)
             self._log_trade(tag, symbol, qty, price, strategy=strategy_name, dry_run=True)
             return True
 
@@ -613,6 +750,7 @@ class MultiStrategyTrader:
                 self.holding_qty = qty
                 self.holding_avg_price = price
                 self.holding_strategy = strategy_name
+                self.trailing_stop.on_entry(symbol, price)
             self._log_trade(tag, symbol, qty, price, strategy=strategy_name)
             return True
         else:
@@ -654,6 +792,7 @@ class MultiStrategyTrader:
                 self._clear_intraday()
                 self.pdt.record_day_trade(symbol)
             else:
+                self.trailing_stop.on_exit(symbol)
                 self._clear_holding()
             return True
 
@@ -673,6 +812,7 @@ class MultiStrategyTrader:
                 self._clear_intraday()
                 self.pdt.record_day_trade(symbol)
             else:
+                self.trailing_stop.on_exit(symbol)
                 self._clear_holding()
             return True
         else:
@@ -696,21 +836,17 @@ class MultiStrategyTrader:
     def _log_trade(self, action: str, symbol: str, qty: int, price: float,
                    pnl: float = 0, strategy: str = "", dry_run: bool = False,
                    error: str = ""):
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "action": action,
-            "symbol": symbol,
-            "strategy": strategy,
-            "qty": qty,
-            "price": price,
-            "pnl": round(pnl, 2),
-            "pdt_remaining": self.pdt.remaining_day_trades(),
-            "dry_run": dry_run,
-            "error": error,
-        }
-        log_file = self.trade_log_dir / f"trades_{datetime.now().strftime('%Y%m')}.jsonl"
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        self.trade_store.log_trade(
+            action=action,
+            symbol=symbol,
+            qty=qty,
+            price=price,
+            pnl=pnl,
+            strategy=strategy,
+            pdt_remaining=self.pdt.remaining_day_trades(),
+            dry_run=dry_run,
+            error=error,
+        )
 
     # ── Can we trade intraday right now? ────────────────────────
 
@@ -749,10 +885,11 @@ class MultiStrategyTrader:
     def run_once(self):
         """Daily swing evaluation with macro risk layers:
         1. Regime assessment (VIX/ADX/EWMA vol)
-        2. QQQ SMA200 trend filter (global entry gate)
-        3. Dual momentum rotation (prefer TQQQ or SOXL)
-        4. Collect swing strategy signals
-        5. Execute best signal with VIX adaptive position sizing
+        2. Hedge portfolio management
+        3. VIX danger / SMA200 force-exit checks
+        4. Momentum rotation: rank 7 ETFs -> top-N candidates
+        5. Collect signals only from candidates
+        6. Execute best BUY with VIX adaptive position sizing
         """
         self.sync_position()
         self.pdt.cleanup_old_trades()
@@ -808,7 +945,16 @@ class MultiStrategyTrader:
                 self.execute_sell(price, is_intraday=False)
             return
 
-        all_signals = self._collect_swing_signals()
+        # Momentum rotation: rank all pool symbols, pick top-N candidates
+        rotation_enabled = self.rotation_cfg.get("enabled", True)
+        mom_scores: dict[str, float] = {}
+        if rotation_enabled:
+            candidates, mom_scores = self._momentum_rotation_rank()
+            candidate_set = set(candidates) if candidates else None
+        else:
+            candidate_set = None
+
+        all_signals = self._collect_swing_signals(candidate_symbols=candidate_set)
 
         if not all_signals:
             self.logger.info("No swing signals. Done.")
@@ -822,6 +968,7 @@ class MultiStrategyTrader:
 
         self.logger.info(f"Swing signals: {len(buy_signals)} BUY, {len(sell_signals)} SELL")
 
+        # Handle exit for current holding
         if self.holding_symbol:
             exit_signals = [s for s in sell_signals if s["symbol"] == self.holding_symbol]
             if exit_signals:
@@ -843,6 +990,7 @@ class MultiStrategyTrader:
                 )
                 return
 
+        # Handle new entry
         if buy_signals and self.holding_symbol is None:
             # Gate 1: SMA200 filter
             if not qqq_above_sma200:
@@ -857,31 +1005,33 @@ class MultiStrategyTrader:
                 )
                 return
 
-            # Gate 3: Dual momentum — prefer the momentum-ranked symbol
-            preferred_sym = self._dual_momentum_rank()
-            if preferred_sym:
-                preferred_buys = [b for b in buy_signals if b["symbol"] == preferred_sym]
-                if preferred_buys:
-                    buy_signals = preferred_buys
-                    self.logger.info(
-                        f"[MOMENTUM FILTER] Preferring {preferred_sym} "
-                        f"({len(preferred_buys)} signals)"
-                    )
-
             best = buy_signals[0]
+            best_mom = mom_scores.get(best["symbol"], 0.0)
             self.logger.info(
                 f">>> SWING BUY: {best['strategy_name']}@{best['symbol']} "
                 f"score={best['score']:.1f} str={best['signal'].strength:.1f} "
-                f"| {best['signal'].reason}"
+                f"mom={best_mom:+.3f} | {best['signal'].reason}"
             )
             price = self.get_current_price(best["symbol"])
             if price:
-                self.execute_buy(best["symbol"], price, best["strategy_name"],
-                                 is_intraday=False)
+                self.execute_buy(
+                    best["symbol"], price, best["strategy_name"],
+                    is_intraday=False,
+                    signal_strength=best["signal"].strength,
+                    momentum_score=best_mom,
+                )
             else:
                 self.logger.error(f"Cannot get price for {best['symbol']}")
         elif self.holding_symbol is None:
-            self.logger.info("No swing BUY signals. Staying flat.")
+            cash_cfg = self.config.get("cash_yield", {})
+            if cash_cfg.get("enabled", False):
+                self.logger.info(
+                    f"No swing BUY signals. Staying flat. "
+                    f"Consider {cash_cfg.get('cash_etf', 'BIL')} for idle cash "
+                    f"({cash_cfg.get('annual_yield_pct', 4.5)}% annual yield)."
+                )
+            else:
+                self.logger.info("No swing BUY signals. Staying flat.")
 
     def run_intraday_tick(self):
         """Single intraday evaluation tick (called every 5 min during market hours)."""
@@ -954,7 +1104,8 @@ class MultiStrategyTrader:
         print(f"Mode:       {'DRY-RUN' if self.dry_run else '*** REAL MONEY ***'}")
         print(f"Symbols:    {sym_list}")
         print(f"Strategies: {n_strats} swing + TQQQ/UGL hedge portfolio")
-        print(f"Risk Mgmt:  QQQ SMA200 + VIX adaptive + Dual Momentum + Crash Filter")
+        print(f"Rotation:   4-ETF risk-adj momentum -> top-{self.rotation_cfg.get('candidate_count', 2)} (dynamic)")
+        print(f"Risk Mgmt:  QQQ SMA200 + VIX adaptive + Trailing Stop + Signal Filter")
         print(f"Capital:    ${self.config['account']['initial_capital']:,.0f}")
         print(f"PDT:        {self.pdt.remaining_day_trades()}/{self.pdt.max_day_trades} remaining")
         print(f"Swing pos:  {self.holding_symbol or 'FLAT'}")
@@ -978,22 +1129,62 @@ class MultiStrategyTrader:
                 if self._is_market_hours():
                     self.run_intraday_tick()
 
-                # Monitor swing position hard stop
+                # Heartbeat: show status every tick
+                from zoneinfo import ZoneInfo
+                et_now = datetime.now(ZoneInfo("US/Eastern"))
+                market_status = "OPEN" if self._is_market_hours() else "CLOSED"
+                if self.holding_symbol:
+                    self.logger.info(
+                        f"[TICK] {et_now.strftime('%H:%M')} ET | Market {market_status} | "
+                        f"Holding: {self.holding_symbol} x{self.holding_qty}"
+                    )
+                else:
+                    self.logger.info(
+                        f"[TICK] {et_now.strftime('%H:%M')} ET | Market {market_status} | "
+                        f"FLAT (cash) | Next eval: tomorrow"
+                    )
+
+                # Monitor swing position: trailing stop + hard stop
                 if self.holding_symbol and self.holding_qty > 0:
                     price = self.get_current_price(self.holding_symbol)
                     if price:
                         pnl_pct = (price / self.holding_avg_price - 1) * 100
+
+                        # Get ATR for trailing stop
+                        atr_val = 0.0
+                        df_ts = self.get_daily_kline(self.holding_symbol, 20)
+                        if df_ts is not None and len(df_ts) >= 14:
+                            df_ts = TechnicalIndicators.add_atr(df_ts, 14)
+                            if "atr_14" in df_ts.columns and not pd.isna(df_ts["atr_14"].iloc[-1]):
+                                atr_val = float(df_ts["atr_14"].iloc[-1])
+
+                        ts_state = self.trailing_stop.get_state(self.holding_symbol)
+                        ts_info = ""
+                        if ts_state and ts_state.active_tier > 0:
+                            ts_info = f" TS=T{ts_state.active_tier}@${ts_state.stop_price:.2f}"
+
                         self.logger.info(
                             f"[MONITOR] {self.holding_symbol} ${price:.2f} "
-                            f"PnL={pnl_pct:+.1f}% x{self.holding_qty} ({self.holding_strategy})"
+                            f"PnL={pnl_pct:+.1f}% x{self.holding_qty} "
+                            f"({self.holding_strategy}){ts_info}"
                         )
-                        hard_stop = self.config["risk"].get("hard_stop_pct", 0.08)
-                        if pnl_pct < -hard_stop * 100:
-                            self.logger.warning(
-                                f"[HARD STOP] {self.holding_symbol} loss {pnl_pct:.2f}% "
-                                f"exceeds {hard_stop * 100:.0f}%. SELLING."
-                            )
+
+                        # Check trailing stop first
+                        ts_reason = self.trailing_stop.update(
+                            self.holding_symbol, price, atr_val
+                        )
+                        if ts_reason:
+                            self.logger.info(f"[TRAILING STOP] {ts_reason}")
                             self.execute_sell(price, is_intraday=False)
+                        else:
+                            # Fall through to hard stop
+                            hard_stop = self.config["risk"].get("hard_stop_pct", 0.08)
+                            if pnl_pct < -hard_stop * 100:
+                                self.logger.warning(
+                                    f"[HARD STOP] {self.holding_symbol} loss {pnl_pct:.2f}% "
+                                    f"exceeds {hard_stop * 100:.0f}%. SELLING."
+                                )
+                                self.execute_sell(price, is_intraday=False)
 
                 time.sleep(interval)
 

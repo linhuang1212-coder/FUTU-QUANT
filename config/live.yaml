@@ -15,8 +15,13 @@ risk:
   max_consecutive_losses: 3
   cooldown_minutes: 1440
   trailing_stop:
-    activate_pct: 0.03
-    trail_pct: 0.02
+    enabled: true
+    activate_pct: 0.10           # Activate after +10% gain (leveraged ETFs need room)
+    trail_pct: 0.06              # Trail 6% from peak
+    tier2_activate_pct: 0.25     # Tighten after +25% gain
+    tier2_trail_pct: 0.04        # Trail 4% at tier 2
+    atr_enabled: true
+    atr_multiplier: 2.5
   hard_stop_pct: 0.08
   eod_close_minutes_before: 15
 
@@ -31,11 +36,27 @@ vol_target:
   vix_reduce_threshold: 22.0
   adx_trend_threshold: 25.0
   adx_period: 14
-  vol_target: 0.18
+  vol_target: 0.50            # TQQQ/SOXL annualized vol ~60-90%; 0.18 was too conservative
   ewma_lambda: 0.94
   dd_threshold: -0.20
   dd_scale_factor: 0.5
   max_position_scale: 0.95
+  min_position_scale: 0.15    # floor to avoid zero-size positions on $3k capital
+
+rotation:
+  enabled: true
+  candidate_count: 2
+  momentum_weights:
+    mom_1m: 0.5
+    mom_3m: 0.5
+  min_momentum: 0.0
+  rerank_interval_days: 1
+  risk_adjust: false              # Backtest showed raw momentum outperforms risk-adjusted
+  vol_lookback: 21
+  hysteresis_pct: 0.03
+  dynamic_candidates: false       # Keep fixed top-2 for now
+  high_trend_adx: 30
+  low_trend_adx: 20
 
 hedge_portfolio:
   enabled: true
@@ -44,6 +65,27 @@ hedge_portfolio:
   safe_symbol: "US.IEF"       # 7-10yr Treasury (crash safe haven)
   rebal_days: 21              # rebalance every ~1 month
   crash_pct: -20.0            # crash filter: TQQQ drops >20% in a day
+
+position_sizing:
+  enabled: false                  # Backtest showed no benefit; keep module for future tuning
+  base_allocation: 0.72
+  strength_bonus: 0.18
+  momentum_bonus: 0.12
+  max_allocation: 0.92
+  min_allocation: 0.50
+
+signal_filter:
+  enabled: false                  # Backtest showed over-filtering hurts; keep module available
+  min_strength: 60.0
+  confirmation_days: 1
+  min_strategies_agree: 2
+  adx_entry_min: 20.0
+  volume_confirm: true
+
+cash_yield:
+  enabled: true
+  annual_yield_pct: 4.5
+  cash_etf: "US.BIL"
 
 signal:
   min_strength_stock: 50
@@ -135,5 +177,55 @@ portfolio:
             slow_ma_period: 20
             rsi_period: 10
             ema_period: 20
+            buy_threshold: 3
+            sell_threshold: 3
+    - code: "US.UPRO"
+      strategies:
+        - name: breakout
+          sharpe_weight: 1.0
+          params:
+            lookback_period: 10
+            volume_ratio_threshold: 1.2
+            atr_breakout_multiplier: 1.5
+        - name: mean_reversion
+          sharpe_weight: 1.0
+          params:
+            bb_period: 20
+            bb_std: 2.0
+            rsi_period: 14
+            rsi_oversold: 25
+            rsi_overbought: 75
+        - name: multi_factor
+          sharpe_weight: 1.0
+          params:
+            fast_ma_period: 10
+            slow_ma_period: 20
+            rsi_period: 10
+            ema_period: 15
+            buy_threshold: 3
+            sell_threshold: 3
+    - code: "US.TECL"
+      strategies:
+        - name: breakout
+          sharpe_weight: 1.0
+          params:
+            lookback_period: 10
+            volume_ratio_threshold: 1.2
+            atr_breakout_multiplier: 1.5
+        - name: mean_reversion
+          sharpe_weight: 1.0
+          params:
+            bb_period: 20
+            bb_std: 2.0
+            rsi_period: 14
+            rsi_oversold: 25
+            rsi_overbought: 75
+        - name: multi_factor
+          sharpe_weight: 1.0
+          params:
+            fast_ma_period: 10
+            slow_ma_period: 20
+            rsi_period: 10
+            ema_period: 15
             buy_threshold: 3
             sell_threshold: 3

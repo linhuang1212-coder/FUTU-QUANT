@@ -32,11 +32,12 @@ class VolatilityTargetManager:
         vix_reduce_threshold: float = 22.0,
         adx_trend_threshold: float = 25.0,
         adx_period: int = 14,
-        vol_target: float = 0.18,
+        vol_target: float = 0.50,
         ewma_lambda: float = 0.94,
         dd_threshold: float = -0.20,
         dd_scale_factor: float = 0.5,
         max_position_scale: float = 0.95,
+        min_position_scale: float = 0.15,
     ):
         self.vix_entry_max = vix_entry_max
         self.vix_force_close = vix_force_close
@@ -48,6 +49,7 @@ class VolatilityTargetManager:
         self.dd_threshold = dd_threshold
         self.dd_scale_factor = dd_scale_factor
         self.max_position_scale = max_position_scale
+        self.min_position_scale = min_position_scale
 
     def get_vix_level(self, quote_ctx) -> Optional[float]:
         """Fetch current VIX from Futu. Returns None if unavailable."""
@@ -63,49 +65,54 @@ class VolatilityTargetManager:
         return None
 
     def compute_adx(self, df: pd.DataFrame, period: Optional[int] = None) -> float:
-        """Compute ADX from daily OHLC data. Returns latest ADX value."""
+        """Compute ADX from daily OHLC using standard Wilder's method.
+        Uses pandas Series for correct alignment and NaN handling."""
         p = period or self.adx_period
-        if len(df) < p * 2:
+        if len(df) < p * 3:
             return 0.0
 
-        high = df["high"].values.astype(float)
-        low = df["low"].values.astype(float)
-        close = df["close"].values.astype(float)
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
+        close = df["close"].astype(float)
 
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.maximum(
-                np.abs(high[1:] - close[:-1]),
-                np.abs(low[1:] - close[:-1])
-            )
+        prev_high = high.shift(1)
+        prev_low = low.shift(1)
+        prev_close = close.shift(1)
+
+        tr = pd.concat([
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ], axis=1).max(axis=1)
+
+        up_move = high - prev_high
+        down_move = prev_low - low
+
+        plus_dm = pd.Series(
+            np.where((up_move > down_move) & (up_move > 0), up_move, 0.0),
+            index=df.index,
         )
-        plus_dm = np.where(
-            (high[1:] - high[:-1]) > (low[:-1] - low[1:]),
-            np.maximum(high[1:] - high[:-1], 0),
-            0.0
-        )
-        minus_dm = np.where(
-            (low[:-1] - low[1:]) > (high[1:] - high[:-1]),
-            np.maximum(low[:-1] - low[1:], 0),
-            0.0
+        minus_dm = pd.Series(
+            np.where((down_move > up_move) & (down_move > 0), down_move, 0.0),
+            index=df.index,
         )
 
-        def wilder_smooth(arr, period):
-            result = np.empty_like(arr)
-            result[:period] = np.nan
-            result[period - 1] = np.mean(arr[:period])
-            for i in range(period, len(arr)):
-                result[i] = result[i-1] - result[i-1] / period + arr[i]
-            return result
+        atr_s = tr.ewm(alpha=1.0 / p, min_periods=p, adjust=False).mean()
+        plus_dm_s = plus_dm.ewm(alpha=1.0 / p, min_periods=p, adjust=False).mean()
+        minus_dm_s = minus_dm.ewm(alpha=1.0 / p, min_periods=p, adjust=False).mean()
 
-        atr = wilder_smooth(tr, p)
-        plus_di = 100 * wilder_smooth(plus_dm, p) / np.where(atr > 0, atr, 1)
-        minus_di = 100 * wilder_smooth(minus_dm, p) / np.where(atr > 0, atr, 1)
-        dx = 100 * np.abs(plus_di - minus_di) / np.where(plus_di + minus_di > 0, plus_di + minus_di, 1)
-        adx = wilder_smooth(dx[~np.isnan(dx)], p)
+        plus_di = 100 * plus_dm_s / atr_s.replace(0, np.nan)
+        minus_di = 100 * minus_dm_s / atr_s.replace(0, np.nan)
 
-        valid = adx[~np.isnan(adx)]
-        return float(valid[-1]) if len(valid) > 0 else 0.0
+        di_sum = plus_di + minus_di
+        dx = (100 * (plus_di - minus_di).abs() / di_sum.replace(0, np.nan)).clip(0, 100)
+
+        adx = dx.ewm(alpha=1.0 / p, min_periods=p, adjust=False).mean()
+
+        last_val = adx.dropna()
+        if len(last_val) == 0:
+            return 0.0
+        return float(np.clip(last_val.iloc[-1], 0, 100))
 
     def compute_ewma_vol(self, df: pd.DataFrame) -> float:
         """Compute EWMA annualized volatility from daily closes."""
@@ -165,9 +172,10 @@ class VolatilityTargetManager:
         # Drawdown governor
         dd_scale = self.dd_scale_factor if drawdown < self.dd_threshold else 1.0
 
-        position_scale = min(
-            vol_scale * vix_scale * dd_scale,
-            self.max_position_scale
+        raw_scale = vol_scale * vix_scale * dd_scale
+        position_scale = max(
+            min(raw_scale, self.max_position_scale),
+            self.min_position_scale if not vix_danger else 0.0,
         )
 
         # Regime label

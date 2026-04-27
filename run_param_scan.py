@@ -531,9 +531,29 @@ def walk_forward_scan(
     return val_results
 
 
-def run_scan(output_path: str):
+# ── 并行 worker（顶层函数，Windows multiprocessing 兼容）────────────────────
+import os as _os
+from concurrent.futures import ProcessPoolExecutor as _PPE, as_completed as _asc
+
+
+def _scan_worker(args):
+    """单个 (strat, symbol) walk-forward 任务，在子进程中运行。"""
+    strat_name, df_records, symbol, grid, train_pct = args
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    import pandas as _pd
+    df = _pd.DataFrame(df_records)
+    results = walk_forward_scan(strat_name, df, symbol, grid, train_pct)
+    return strat_name, symbol, results
+
+
+def run_scan(output_path: str, n_jobs: int = -1):
+    n_workers = _os.cpu_count() if n_jobs == -1 else max(1, n_jobs)
     print("=" * 60)
-    print("FUTU-QUANT Parameter Scan (Fast Mode)")
+    print(f"FUTU-QUANT Parameter Scan  [workers={n_workers}]")
     print("=" * 60)
 
     print("\n[1/3] Fetching historical data...")
@@ -548,31 +568,52 @@ def run_scan(output_path: str):
         precomputed[sym] = precompute_indicators(df)
         print(f"  {sym}: {len(df)} bars, {len(precomputed[sym].columns)} columns")
 
-    all_results = []
-    print("\n[3/3] Walk-forward optimization...")
-
+    # 构造并行任务
+    tasks = []
     for strat_name, cfg in STRATEGY_GRIDS.items():
         grid = cfg["grid"]
-        n_combos = 1
-        for v in grid.values():
-            n_combos *= len(v)
-        print(f"\n  Strategy: {strat_name} ({n_combos} combos x {len(precomputed)} symbols)")
-
         for sym, df in precomputed.items():
-            print(f"    {sym}...", end=" ", flush=True)
+            # 序列化 DataFrame 为 records（子进程 pickle 友好）
+            tasks.append((strat_name, df.to_dict("records"), sym, grid, 0.7))
+
+    total_tasks = len(tasks)
+    all_results = []
+    print(f"\n[3/3] Walk-forward optimization  ({total_tasks} tasks, {n_workers} workers)...")
+
+    if n_workers == 1:
+        for i, t in enumerate(tasks, 1):
+            strat_name, sym = t[0], t[2]
+            print(f"  [{i}/{total_tasks}] {strat_name}@{sym}...", end=" ", flush=True)
             try:
-                results = walk_forward_scan(strat_name, df, sym, grid)
+                _, _, results = _scan_worker(t)
                 if results:
                     all_results.extend(results)
                     best = max(results, key=lambda r: r["sharpe_ratio"])
-                    print(f"top Sharpe={best['sharpe_ratio']}, "
-                          f"return={best['total_return_pct']:+.1f}%, "
-                          f"trades={best['total_trades']}, "
-                          f"overfit={best.get('overfit_pct', 'N/A')}%")
+                    print(f"Sharpe={best['sharpe_ratio']:.4f} ret={best['total_return_pct']:+.1f}%")
                 else:
-                    print("no valid results (< 2 trades)")
+                    print("no valid results")
             except Exception as e:
-                print(f"error: {e}")
+                print(f"ERROR: {e}")
+    else:
+        with _PPE(max_workers=n_workers) as pool:
+            future_map = {pool.submit(_scan_worker, t): (t[0], t[2]) for t in tasks}
+            done = 0
+            for fut in _asc(future_map):
+                done += 1
+                strat_name, sym = future_map[fut]
+                try:
+                    _, _, results = fut.result()
+                    if results:
+                        all_results.extend(results)
+                        best = max(results, key=lambda r: r["sharpe_ratio"])
+                        print(f"  [{done}/{total_tasks}] {strat_name}@{sym}: "
+                              f"Sharpe={best['sharpe_ratio']:.4f}  "
+                              f"ret={best['total_return_pct']:+.1f}%  "
+                              f"overfit={best.get('overfit_pct', 'N/A')}%")
+                    else:
+                        print(f"  [{done}/{total_tasks}] {strat_name}@{sym}: no valid results")
+                except Exception as e:
+                    print(f"  [{done}/{total_tasks}] {strat_name}@{sym}: ERROR {e}")
 
     if not all_results:
         print("\nNo results. Strategies may not generate enough trades.")
@@ -612,5 +653,6 @@ def run_scan(output_path: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FUTU-QUANT Parameter Scan")
     parser.add_argument("--output", default="results/scan_results.csv")
+    parser.add_argument("--jobs", type=int, default=-1, help="并行进程数，-1=全部CPU")
     args = parser.parse_args()
-    run_scan(args.output)
+    run_scan(args.output, n_jobs=args.jobs)
