@@ -47,6 +47,27 @@ class TradeStore:
             );
             CREATE INDEX IF NOT EXISTS idx_pdt_timestamp
                 ON pdt_day_trades(timestamp);
+
+            CREATE TABLE IF NOT EXISTS option_trades (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp       TEXT    NOT NULL,
+                strategy        TEXT    NOT NULL,
+                underlying      TEXT    NOT NULL,
+                legs            TEXT    NOT NULL,
+                max_loss        REAL,
+                target_pnl      REAL,
+                status          TEXT    DEFAULT 'open',
+                close_timestamp TEXT,
+                realized_pnl    REAL    DEFAULT 0,
+                close_reason    TEXT    DEFAULT '',
+                dry_run         INTEGER DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_opt_strategy
+                ON option_trades(strategy);
+            CREATE INDEX IF NOT EXISTS idx_opt_underlying
+                ON option_trades(underlying);
+            CREATE INDEX IF NOT EXISTS idx_opt_status
+                ON option_trades(status);
         """)
         self._conn.commit()
 
@@ -142,6 +163,77 @@ class TradeStore:
         )
         self._conn.commit()
         return cur.rowcount
+
+    # ── Option trade records ─────────────────────────────────────
+
+    def log_option_trade(
+        self,
+        strategy: str,
+        underlying: str,
+        legs_json: str,
+        max_loss: float = 0.0,
+        target_pnl: float = 0.0,
+        status: str = "open",
+        dry_run: bool = False,
+    ) -> int:
+        ts = datetime.now().isoformat()
+        cur = self._conn.execute(
+            """INSERT INTO option_trades
+               (timestamp, strategy, underlying, legs, max_loss,
+                target_pnl, status, dry_run)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (ts, strategy, underlying, legs_json,
+             round(max_loss, 2), round(target_pnl, 2), status, int(dry_run)),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def close_option_trade(
+        self,
+        trade_id: int,
+        realized_pnl: float,
+        close_reason: str = "",
+    ) -> None:
+        ts = datetime.now().isoformat()
+        self._conn.execute(
+            """UPDATE option_trades
+               SET status = 'closed', close_timestamp = ?,
+                   realized_pnl = ?, close_reason = ?
+               WHERE id = ?""",
+            (ts, round(realized_pnl, 2), close_reason, trade_id),
+        )
+        self._conn.commit()
+
+    def query_option_trades(
+        self,
+        strategy: Optional[str] = None,
+        underlying: Optional[str] = None,
+        status: Optional[str] = None,
+        days: Optional[int] = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list = []
+        if strategy:
+            clauses.append("strategy = ?")
+            params.append(strategy)
+        if underlying:
+            clauses.append("underlying = ?")
+            params.append(underlying)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if days is not None:
+            cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+            clauses.append("timestamp >= ?")
+            params.append(cutoff)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        sql = f"SELECT * FROM option_trades {where} ORDER BY id DESC LIMIT ?"
+        cur = self._conn.execute(sql, params)
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     # ── Lifecycle ────────────────────────────────────────────────
 

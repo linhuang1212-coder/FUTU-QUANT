@@ -314,6 +314,27 @@ class BacktestReport:
         else:
             lines.append("  (n/a — need aligned `data` time_key + equity_curve)")
         lines.append("=" * 58)
+
+        # DSR validation if enough trades
+        n_trades = s["total_trades"]
+        sharpe = s["sharpe_ratio"]
+        win_rate = s["win_rate_pct"]
+        if n_trades > 0 and isinstance(sharpe, (int, float)) and math.isfinite(sharpe):
+            try:
+                from backtest.validation import deflated_sharpe_ratio, sample_size_check
+                dsr = deflated_sharpe_ratio(sharpe, n_trials=1, T=n_trades)
+                sc = sample_size_check(n_trades, win_rate / 100 if win_rate > 1 else win_rate)
+                lines.append("STATISTICAL VALIDATION")
+                lines.append(f"  DSR:                     {dsr['deflated_sharpe']} "
+                             f"(noise floor={dsr['expected_max_noise_sharpe']})")
+                lines.append(f"  p-value:                 {dsr['p_value']}")
+                lines.append(f"  Significant:             {'YES' if dsr['is_significant'] else 'NO'}")
+                lines.append(f"  Sample:                  {sc['n_trades']}/{sc['min_required']} "
+                             f"({sc['verdict']})")
+                lines.append("=" * 58)
+            except Exception:
+                pass
+
         report = "\n".join(lines)
         print(report)
         return report

@@ -1,0 +1,124 @@
+options:
+  enabled: true
+  trade_env: SIMULATE
+  # Financial Modeling Prep API key (free tier: 250 req/day)
+  # Register at https://financialmodelingprep.com/developer/docs/
+  fmp_api_key: ""  # set via .env file: FMP_API_KEY=xxx
+
+  capital_allocation:
+    wheel: 1200
+    credit_spread: 1200
+    orb_0dte: 600
+    pmcc: 0           # activate when capital grows
+    cash_reserve: 0
+
+  risk:
+    max_daily_loss: 300
+    max_monthly_drawdown: 600
+
+    portfolio:
+      max_total_risk_pct: 0.20        # 组合总最大亏损 <= 20% 本金 ($600)
+      max_single_exposure_pct: 0.15   # 单标的敞口 <= 15% 本金 ($450)
+      max_correlated_positions: 1     # 高相关标的最多 1 个持仓
+
+    per_strategy:
+      orb:
+        max_loss_per_trade: 200
+        max_trades_per_day: 1
+        max_trades_per_week: 2     # PDT-safe: leave 1 PDT slot as buffer
+      credit_spread:
+        max_loss_per_trade: 250
+        min_credit_received: 0.15
+        max_open_positions: 2
+      wheel:
+        max_loss_per_trade: 500    # CSP max assignment risk
+        max_open_positions: 1      # one underlying at a time
+      pmcc:
+        enabled: false             # activate when capital > $5,000
+        max_loss_per_trade: 500
+      straddle:
+        enabled: false
+      earnings:
+        max_loss_per_trade: 150
+
+  orb:
+    symbols:
+      - "US.SPY"
+      - "US.QQQ"
+    orb_minutes: 30
+    max_premium: 200
+    stop_loss_pct: 0.50
+    target_pct: 1.00
+
+  credit_spread:
+    scan_symbols:
+      - "US.AAPL"
+      - "US.MSFT"
+      - "US.GOOGL"
+      - "US.AMZN"
+      - "US.META"
+      - "US.NVDA"
+      - "US.TSLA"
+      - "US.SPY"
+      - "US.QQQ"
+      - "US.IWM"
+    min_ivr: 60
+    target_delta: 0.30
+    spread_width: 5.0
+    profit_take_pct: 0.50
+    stop_loss_pct: 2.00
+    max_holding_days: 21
+    max_positions: 3
+
+  earnings:
+    scan_symbols:
+      - "US.AAPL"
+      - "US.MSFT"
+      - "US.GOOGL"
+      - "US.AMZN"
+      - "US.META"
+      - "US.NVDA"
+      - "US.TSLA"
+    ivr_max: 40
+    days_before: 7
+    close_days_before: 1
+    spread_width_pct: 0.05
+
+  wheel:
+    symbols:
+      - "US.SOFI"       # $18 金融科技 HV=44% vol=5430万
+      - "US.F"           # $12 福特汽车 HV=33% vol=3590万
+      - "US.AAL"         # $12 美国航空 HV=52% vol=5780万
+      - "US.RIVN"        # $17 EV赛道  HV=41% vol=2400万
+      - "US.VALE"        # $17 矿业巨头 HV=27% vol=2520万
+      - "US.PINS"        # $20 社交广告 HV=38% vol=1400万
+    max_stock_price: 25       # only stocks ≤ $25 (leave cash buffer)
+    csp_delta: 0.30           # sell OTM put at delta ~0.30
+    cc_delta: 0.30            # sell OTM call at delta ~0.30
+    min_ivr: 30               # minimum IVR for selling premium
+    target_dte: 30            # ~30 days to expiry
+    profit_take_pct: 0.50     # close at 50% of credit received
+    max_holding_days: 45
+
+  pmcc:
+    enabled: false
+    symbols:
+      - "US.AAPL"
+      - "US.MSFT"
+    leaps_delta: 0.80         # deep ITM LEAPS (delta ~0.80)
+    leaps_dte: 365            # ~1 year out
+    short_call_delta: 0.30    # sell OTM call monthly
+    short_call_dte: 30
+    max_leaps_cost: 2500
+    profit_take_pct: 0.50
+
+  straddle:
+    enabled: false
+    symbols:
+      - "US.GLD"
+      - "US.TLT"
+      - "US.SPY"
+      - "US.QQQ"
+    bb_width_lookback: 126
+    bb_width_percentile: 5
+    max_holding_days: 14
