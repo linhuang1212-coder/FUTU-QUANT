@@ -7,6 +7,9 @@ from utils.logger import setup_logger
 logger = setup_logger("options.chain")
 
 
+_CHAIN_API_DELAY = 3.0  # Futu limit: 10 req / 30s → 3s per request is safe
+
+
 class OptionChainFetcher:
     """Wraps Futu OpenAPI for option chain queries with caching."""
 
@@ -34,7 +37,7 @@ class OptionChainFetcher:
         if cached is not None:
             return cached
 
-        time.sleep(0.3)
+        time.sleep(_CHAIN_API_DELAY)
         ret, data = self._ctx.get_option_expiration_date(code=underlying)
         if ret != RET_OK or data is None:
             logger.error(f"Failed to get expiry dates for {underlying}: {data}")
@@ -56,7 +59,7 @@ class OptionChainFetcher:
         if cached is not None:
             return cached
 
-        time.sleep(0.3)
+        time.sleep(_CHAIN_API_DELAY)
         ret, data = self._ctx.get_option_chain(
             code=underlying, start=start, end=end,
             option_type=type_map.get(option_type, OptionType.ALL),
@@ -73,7 +76,7 @@ class OptionChainFetcher:
         from futu import RET_OK
         if not option_codes:
             return None
-        time.sleep(0.3)
+        time.sleep(_CHAIN_API_DELAY)
         ret, data = self._ctx.get_market_snapshot(option_codes)
         if ret != RET_OK or data is None:
             logger.error(f"Failed to get option quotes: {data}")
@@ -92,7 +95,7 @@ class OptionChainFetcher:
     def find_atm_option(self, underlying: str, expiry: str, option_type: str = "CALL"):
         """Find the ATM option closest to current price."""
         from futu import RET_OK
-        time.sleep(0.3)
+        time.sleep(_CHAIN_API_DELAY)
         ret, snap = self._ctx.get_market_snapshot([underlying])
         if ret != RET_OK or snap is None or len(snap) == 0:
             logger.error(f"Cannot get price for {underlying}")
@@ -122,7 +125,7 @@ class OptionChainFetcher:
             return None
 
         from futu import RET_OK
-        time.sleep(0.3)
+        time.sleep(_CHAIN_API_DELAY)
         ret, snap = self._ctx.get_market_snapshot([underlying])
         if ret != RET_OK or snap is None:
             return None

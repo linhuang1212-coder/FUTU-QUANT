@@ -1,17 +1,17 @@
 futu:
   host: "127.0.0.1"
   port: 11111
-  trade_env: SIMULATE
+  trade_env: REAL
 
 account:
-  initial_capital: 3000
+  initial_capital: 2700       # USD (≈ HKD 21,700)
   currency: USD
 
 risk:
   max_loss_per_trade_pct: 0.05
-  max_daily_loss_pct: 0.08
-  max_position_pct: 0.40
-  max_total_position_pct: 0.80
+  max_daily_loss_pct: 0.05    # $135/天
+  max_position_pct: 0.35
+  max_total_position_pct: 0.90
   max_consecutive_losses: 3
   cooldown_minutes: 60
   trailing_stop:
@@ -30,9 +30,9 @@ signal:
   min_strength_option: 80
 
 telegram:
-  bot_token: "YOUR_BOT_TOKEN"
-  chat_id: "YOUR_CHAT_ID"
-  enabled: false
+  bot_token: ""   # set via .env: TELEGRAM_BOT_TOKEN
+  chat_id: ""     # set via .env: TELEGRAM_CHAT_ID
+  enabled: true
 
 logging:
   level: INFO

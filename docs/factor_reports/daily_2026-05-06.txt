@@ -1,0 +1,50 @@
+==================================================
+  因子库每日报告
+==================================================
+
+📊 市场状态: BULLISH (score=2)
+  breadth: 0.5243
+  ivr_median: 0.0931
+  momentum_dispersion: 1.0000
+  avg_drawdown: 0.3437
+  建议: 积极做多, 增加动量/成长仓位
+
+🚀 动量 Top 10:
+   1. DOCN   score=0.8722
+   2. RLYB   score=0.8709
+   3. SIMO   score=0.8642
+   4. BAND   score=0.8568
+   5. IMOS   score=0.8416
+   6. STRL   score=0.8358
+   7. VIAV   score=0.8317
+   8. MU     score=0.8315
+   9. BE     score=0.8292
+  10. INBX   score=0.8288
+
+💎 价值 Top 10:
+   1. SNEX   score=0.6572
+   2. RL     score=0.6446
+   3. LII    score=0.6444
+   4. OESX   score=0.6396
+   5. TWIN   score=0.6322
+   6. CIEN   score=0.6294
+   7. APTV   score=0.6259
+   8. IDT    score=0.6252
+   9. MSGE   score=0.6139
+  10. AXIL   score=0.6120
+
+📈 Credit Spread 候选:
+  LUCK   score=0.5192
+  LIND   score=0.5161
+  FSTR   score=0.5111
+  QUAD   score=0.5039
+  AUDC   score=0.5032
+
+⚠️ 因子异常 Top 5:
+  SKK    score=2.52 (VOLUME_SURGE=+6.60, VOL_20D=+5.47, VOL_60D=+5.38)
+  AREB   score=2.40 (VOL_20D=+5.47, VOL_60D=+5.38, BB_WIDTH=+5.35)
+  SDOT   score=2.19 (VOLUME_SURGE=+6.60, VOL_20D=+5.47, ATR_PCT=+5.16)
+  AKAN   score=2.15 (VOL_20D=+5.47, VOL_60D=+5.38, BB_WIDTH=+5.35)
+  AIOS   score=2.12 (VOLUME_SURGE=+5.56, VOL_20D=+5.47, VOL_60D=+5.38)
+
+==================================================

@@ -42,6 +42,7 @@ class OptionTrade:
     close_reason: str = ""
     dry_run: bool = False
     trade_id: Optional[int] = None  # DB row id
+    direction_details: str = ""     # Direction analysis summary
 
     def net_premium(self) -> float:
         """Net premium paid (positive) or received (negative)."""

@@ -1,0 +1,62 @@
+fractional:
+  enabled: true
+
+  # ── Cash Parking ──
+  cash_parking:
+    enabled: true
+    symbol: "US.SGOV"            # iShares 0-3 Month Treasury Bond ETF (~$100)
+    fallback_symbol: "US.BIL"    # SPDR 1-3 Month T-Bill ETF (~$92)
+    min_idle_to_buy: 150         # 闲置资金 > $150 时才买入
+    safety_buffer: 500           # 保留 $500 现金不动
+    check_interval_minutes: 30
+
+  # ── Momentum Rotation (核心且唯一策略) ──
+  #
+  # 总本金: $2,700 USD
+  # 分配: $2,200 动量轮动 + $500 现金缓冲
+  # 策略: 12M-1M 动量 → SMA200 过滤 → HRP 加权 → 月度调仓
+  #
+  momentum:
+    enabled: true
+    budget: 2200                 # $2,200 (本金 81%)
+
+    # ── ETF 池 (18 只，覆盖全行业 + 商品 + 避险) ──
+    #
+    # 设计原则:
+    #   1. 覆盖美股 11 个 GICS 行业 — 无论哪个板块涨都能捕捉
+    #   2. 加入半导体 SMH — 上次存储板块暴涨的补课
+    #   3. 黄金/白银/能源商品 — 通胀+地缘对冲
+    #   4. 国际分散 — 不全压美股
+    #   5. 避险资产 SGOV — 熊市自动切入
+    #   6. 全部 <$600，$733/仓可买至少 1 股
+    #
+    pool:
+      # ── 避险 (熊市资金去处) ──
+      - "US.SGOV"    # 短期国债 ~$100  (无风险收益 ~5%)
+      - "US.TLT"     # 长期国债 ~$85   (降息受益)
+
+      # ── 美股行业板块 ──
+      - "US.XLK"     # 科技 ~$166      (AAPL/MSFT/NVDA)
+      - "US.SMH"     # 半导体 ~$523    (MU/NVDA/STX/AVGO — 上次缺失的)
+      - "US.XLF"     # 金融 ~$52       (JPM/BAC)
+      - "US.XLE"     # 能源 ~$59       (XOM/CVX)
+      - "US.XLV"     # 医疗 ~$145      (UNH/JNJ — 防御)
+      - "US.XLI"     # 工业 ~$172      (CAT/HON)
+      - "US.XLY"     # 可选消费 ~$118  (AMZN/TSLA)
+      - "US.XLP"     # 必需消费 ~$84   (PG/KO — 防御)
+      - "US.XLU"     # 公用事业 ~$46   (防御/高股息)
+      - "US.XLRE"    # 房地产 ~$44     (利率敏感)
+
+      # ── 国际 + 商品 ──
+      - "US.VEA"     # 国际发达 ~$69   (欧日)
+      - "US.EEM"     # 新兴市场 ~$65   (中印)
+      - "US.IAUM"    # 黄金 ~$45       (避险+通胀)
+      - "US.SLV"     # 白银 ~$66       (工业+贵金属)
+      - "US.GDX"     # 金矿 ~$86       (黄金杠杆版)
+      - "US.XLB"     # 原材料 ~$52     (矿业/化工)
+
+    top_n: 3                     # 每月选动量 Top 3
+    rebalance_day: 1             # 每月第 1 个交易日
+    lookback_months: 12          # 12 个月动量
+    skip_recent_months: 1        # 跳过最近 1 个月 (避反转)
+    sma_filter: 200              # SMA200 以下不买，转 SGOV

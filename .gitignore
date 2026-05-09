@@ -9,3 +9,8 @@ data_store/
 *.sqlite
 .vscode/
 .idea/
+.cursor/
+_*.py
+.start.lock
+.monitor.lock
+.trade.lock
